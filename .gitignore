@@ -1,0 +1,40 @@
+# Data & checkpoints (too large for GitHub)
+data/
+checkpoints/
+results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Archives & temp files
+*.zip
+*.tar.gz
+*.pth
+*.pt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+output.txt
+*.xlsx
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.synctex.gz
+
+# Report extracted duplicates
+report/extracted/

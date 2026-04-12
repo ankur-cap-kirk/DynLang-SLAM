@@ -1,0 +1,125 @@
+# DynLang-SLAM Default Configuration
+
+# Dataset
+dataset:
+  type: "replica"  # replica, scannet, tum
+  path: "./data/Replica"
+  scene: "room0"
+  image_height: 680
+  image_width: 1200
+  depth_scale: 6553.5  # Replica depth scale factor
+  max_frames: -1  # -1 = all frames
+
+# Camera (Replica default)
+camera:
+  fx: 600.0
+  fy: 600.0
+  cx: 599.5
+  cy: 339.5
+
+# 3D Gaussian Splatting
+gaussians:
+  sh_degree: 0  # 0 = only DC (RGB), 3 = full SH
+  lang_feat_dim: 16  # compressed CLIP feature dimension
+  init_opacity: 0.5
+  min_opacity: 0.005
+  max_gaussians: 1000000
+  # Densification
+  densify_grad_thresh: 0.0002
+  densify_interval: 10  # mapping calls between densification
+  densify_max_scale: 0.05  # split threshold in world units
+  prune_interval: 100
+  opacity_reset_interval: 3000
+  # Size limits
+  max_screen_size: 20  # max 2D screen-space radius for pruning
+
+# SLAM
+slam:
+  render_downscale: 1  # full resolution with gsplat CUDA renderer
+
+  # Tracking
+  tracking:
+    iterations: 50  # optimization steps per frame
+    lr_pose: 0.002  # learning rate for camera pose (tuned for full-res gsplat)
+    lr_end_factor: 0.3  # LR decays to lr_pose * 0.3 by last iteration (gentle decay)
+    use_depth: true
+    depth_weight: 1.0
+    # Coarse-to-fine tracking (GS-SLAM inspired)
+    coarse_to_fine: false  # disabled — regression observed with both 4x and 2x
+    coarse_downscale: 2   # downscale factor for coarse stage (2x = half res)
+    coarse_ratio: 0.4     # fraction of iterations spent on coarse stage
+
+  # Mapping
+  mapping:
+    iterations: 60  # optimization steps per frame
+    lr_means: 0.0001
+    lr_scales: 0.005
+    lr_quats: 0.001
+    lr_opacities: 0.05
+    lr_colors: 0.0025
+    lr_lang_feats: 0.001
+    lr_end_factor: 0.3  # LR decays to lr * 0.3 by last iteration (gentle decay)
+    new_gaussian_thresh: 0.5  # silhouette threshold for adding new gaussians
+
+  # Keyframe selection
+  keyframe:
+    every_n_frames: 5
+    max_keyframes: 200
+    overlap_thresh: 0.95  # skip if >95% overlap with existing keyframes
+
+# Loss weights
+loss:
+  rgb_weight: 0.5
+  depth_weight: 1.2
+  ssim_weight: 0.2
+  lang_weight: 0.1
+
+# Language Features
+language:
+  enabled: true
+  clip_model: "ViT-L-14"  # CLIP model name
+  clip_pretrained: "openai"  # pretrained weights source
+  extract_every_n: 5  # extract CLIP features every N frames
+  use_sam: true  # use SAM for multi-scale masks
+  sam_model: "sam2.1_hiera_t"  # SAM2.1 Hiera-Tiny (fast, lightweight)
+  sam_checkpoint: "checkpoints/sam2.1_hiera_tiny.pt"
+  scales: ["whole"]  # single scale for 8GB GPU; use ["whole", "part", "subpart"] on cloud
+  # Autoencoder
+  autoencoder:
+    input_dim: 768  # CLIP ViT-L/14 output dim
+    hidden_dim: 256
+    latent_dim: 16  # compressed feature dim (must match gaussians.lang_feat_dim)
+    lr: 0.001
+    warmup_frames: 100  # train autoencoder for this many frames, then freeze
+
+# Dynamic Object Handling
+dynamic:
+  enabled: true
+  detector: "yolov8"  # yolov8 or grounding_dino
+  yolo_model: "yolov8x-seg"  # YOLOv8 variant
+  confidence_thresh: 0.5
+  # Dynamic classes (COCO IDs)
+  dynamic_classes: [0, 1, 2, 3, 5, 14, 15, 16, 17]  # person, bicycle, car, motorcycle, bus, bird, cat, dog, horse
+  # Temporal consistency
+  temporal_window: 3  # sliding window size
+  min_detections: 2  # min detections in window to confirm dynamic
+  # Mask processing
+  mask_dilation_kernel: 5  # dilation kernel size in pixels
+  # Contamination cleanup
+  cleanup_every_n: 20  # frames between cleanup passes
+  contamination_thresh: 3  # min frames a gaussian must be contaminated
+
+# Training
+training:
+  seed: 42
+  device: "cuda"
+  mixed_precision: true  # FP16 for models
+
+# Logging
+logging:
+  log_dir: "./results"
+  save_checkpoints: true
+  checkpoint_interval: 500  # save every N frames
+  log_interval: 10  # log metrics every N frames
+  visualize: true
+  viz_interval: 50  # visualize every N frames
