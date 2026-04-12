@@ -1,0 +1,67 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage[breaklinks=true]{hyperref}
+\usepackage{parskip}
+
+\title{Final Project Proposal\\{\large EEE 515: Computer Vision --- Spring 2026}}
+\author{Ankur Guruprasad}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{1. Title}
+
+\textbf{DynLang-SLAM: Dynamic-Aware Open-Vocabulary Language-Embedded 3D Gaussian Splatting SLAM}
+
+\section*{2. Students on the Team}
+
+Ankur Guruprasad (solo)
+
+\section*{3. What is the problem you are solving?}
+
+Current 3D Gaussian Splatting (3DGS) based SLAM systems produce high-quality geometric reconstructions but suffer from two critical limitations: (a) they generate purely geometric maps with no semantic understanding, meaning a robot cannot answer natural language queries like ``where is the coffee mug?'' from the reconstructed map, and (b) they assume a fully static environment, which causes catastrophic tracking failures when dynamic objects such as people or pets are present. These two limitations severely restrict the deployment of 3DGS-SLAM in real-world robotics and augmented reality applications where scenes are rarely static and semantic understanding is essential.
+
+\section*{4. What is the ``new'' or ``novel'' aspect? Why has this not been done before?}
+
+While SplaTAM (CVPR 2024) demonstrated 3DGS for dense SLAM, LangSplat (CVPR 2024) showed language features can be embedded into Gaussians, and DGS-SLAM (2024) addressed dynamic masking, no existing system unifies all three capabilities into a single framework. DynLang-SLAM is novel because it integrates: (1) real-time 3DGS-based tracking and mapping, (2) per-Gaussian CLIP language features compressed via a learned autoencoder (768D to 16D) for open-vocabulary 3D queries, and (3) YOLOv8-Seg dynamic object masking with temporal consistency filtering and Gaussian contamination cleanup.
+
+This combination has not been attempted because each component introduces competing demands on GPU memory and compute---language feature rendering is expensive (LangSplat achieves only 8.2 FPS even on A100 GPUs), dynamic masking adds inference overhead, and all must run alongside the already demanding Gaussian rasterization and pose optimization loop. Our approach addresses this through compact feature compression, selective per-keyframe language extraction, and efficient alpha-masked loss computation that excludes both dynamic and unmapped regions.
+
+\section*{5. Preliminary datasets and code bases}
+
+\begin{itemize}[nosep]
+    \item \textbf{Datasets:} Replica dataset (8 indoor scenes, 2000 frames each, ground-truth RGB-D and camera poses) for static scene evaluation; Bonn RGB-D Dynamic or TUM RGB-D for dynamic scene evaluation (sequences with moving people)
+    \item \textbf{Code base:} Custom implementation (DynLang-SLAM) built from scratch using:
+    \begin{itemize}[nosep]
+        \item gsplat (Nerfstudio's CUDA-accelerated Gaussian rasterizer) for differentiable rendering
+        \item OpenCLIP (ViT-L/14) for language feature extraction
+        \item SAM (Segment Anything Model) for multi-scale object masks
+        \item YOLOv8x-Seg (Ultralytics) for dynamic object detection
+        \item PyTorch 2.10 with CUDA 12.8
+    \end{itemize}
+    \item \textbf{Baselines:} SplaTAM and MonoGS (tracking/reconstruction), LangSplat (language grounding)
+    \item \textbf{Metrics:} ATE RMSE (tracking), PSNR/SSIM/Depth L1 (rendering), relevancy score and IoU (language grounding)
+    \item \textbf{3D Annotated Visualization Deliverables:}
+    \begin{itemize}[nosep]
+        \item Language-annotated 3D map: text queries (e.g., ``find the chair'') highlight matching Gaussians via a relevancy heatmap in the 3D scene
+        \item Camera trajectory overlay: estimated trajectory visualized as a colored path through the Gaussian map with keyframes marked, alongside ground-truth for comparison
+        \item Dynamic mask overlay: per-frame dynamic masks overlaid on the RGB stream, with before/after visualization of contaminated Gaussian cleanup
+        \item Novel-view rendering: photorealistic renders from arbitrary viewpoints demonstrating reconstruction quality beyond the input trajectory
+    \end{itemize}
+\end{itemize}
+
+\section*{6. Tentative timeline}
+
+\begin{itemize}[nosep]
+    \item \textbf{Week 1 (Completed):} Core SLAM pipeline---implemented tracking (6-DOF pose optimization via photometric + depth loss) and mapping (Gaussian parameter optimization + silhouette-based expansion) with gsplat CUDA renderer at full resolution (680$\times$1200). Current results: sub-1\,cm ATE on 4 out of 8 Replica scenes.
+
+    \item \textbf{Week 2:} Language pipeline---integrate CLIP feature extraction, train scene-specific autoencoder (768D $\rightarrow$ 16D), attach per-Gaussian language features using SAM multi-scale masks, implement open-vocabulary text query interface.
+
+    \item \textbf{Week 3:} Dynamic object masking---integrate YOLOv8-Seg for instance segmentation, implement alpha-masked loss excluding dynamic regions from tracking/mapping, add temporal consistency filter across sliding window, implement Gaussian contamination cleanup pass.
+
+    \item \textbf{Week 4:} Full evaluation and ablation study across all 8 Replica scenes. Measure tracking accuracy (ATE), rendering quality (PSNR/SSIM), language grounding accuracy, and ablate each component. Generate 3D annotated visualizations (language query heatmaps, trajectory overlays, dynamic mask overlays, novel-view renders). Write final project report.
+\end{itemize}
+
+\end{document}

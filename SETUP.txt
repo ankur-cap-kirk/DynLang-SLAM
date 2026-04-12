@@ -1,0 +1,123 @@
+DynLang-SLAM: Local Setup Guide
+================================
+
+Requirements:
+  - Python 3.10+
+  - NVIDIA GPU with CUDA support (8GB+ VRAM recommended)
+  - CUDA 12.x toolkit installed
+
+
+Step 1: Create a virtual environment
+-------------------------------------
+  python -m venv venv
+  # Windows:
+  venv\Scripts\activate
+  # Linux/Mac:
+  source venv/bin/activate
+
+
+Step 2: Install PyTorch with CUDA
+----------------------------------
+  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+  Adjust cu128 to match your CUDA version (cu118, cu121, cu124, etc.).
+
+
+Step 3: Install gsplat (Gaussian splatting renderer)
+-----------------------------------------------------
+  pip install gsplat
+
+  If this fails, install from source:
+    pip install git+https://github.com/nerfstudio-project/gsplat.git --no-deps
+
+
+Step 4: Install SAM2
+---------------------
+  pip install sam2
+
+
+Step 5: Install remaining dependencies
+----------------------------------------
+  pip install -r requirements.txt
+
+
+Step 6: Download model checkpoints
+------------------------------------
+  mkdir checkpoints
+
+  SAM2.1 Hiera-Tiny (149MB):
+    Download from: https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt
+    Place at: checkpoints/sam2.1_hiera_tiny.pt
+
+  CLIP ViT-L/14 is downloaded automatically on first run.
+
+
+Step 7: Download Replica dataset
+---------------------------------
+  mkdir -p data/Replica
+  cd data/Replica
+  wget https://cvg-data.inf.ethz.ch/nice-slam/data/Replica/room0.zip
+  unzip room0.zip
+
+  The structure should be:
+    data/Replica/room0/results/frame000000.jpg
+    data/Replica/room0/results/depth000000.png
+    data/Replica/room0/traj.txt
+
+
+Running the tests
+==================
+
+Language pipeline test (single frame, no SLAM):
+  python scripts/test_language.py
+
+  Outputs heatmaps to results/language_test/
+
+Full SLAM + language test (50 frames):
+  python scripts/test_language_slam.py
+
+  Runs tracking + mapping + language extraction, then 3D text queries.
+
+
+Configuration
+==============
+
+Edit configs/default.yaml to adjust settings:
+
+  - scales: ["whole"]              -> single scale, fits 8GB VRAM
+  - scales: ["whole", "part", "subpart"]  -> multi-scale, needs 16GB+ or cloud GPU
+
+  - language.enabled: true/false   -> toggle language features
+  - language.extract_every_n: 5    -> frequency of CLIP extraction
+  - slam.tracking.iterations: 50   -> tracking optimization steps
+  - slam.mapping.iterations: 60    -> mapping optimization steps
+
+
+GPU Memory Tips
+================
+
+For GPUs with 8GB VRAM:
+  - Use single scale: scales: ["whole"]
+  - CLIP and SAM2 are automatically offloaded to CPU between extractions
+  - Feature maps are accumulated on CPU to avoid OOM
+
+For GPUs with 16GB+ VRAM or cloud (Colab A100, etc.):
+  - Use multi-scale: scales: ["whole", "part", "subpart"]
+  - See notebooks/colab_setup.ipynb for Colab setup
+
+
+Project Structure
+==================
+
+  dynlang_slam/
+    core/           - Gaussian map, renderer, losses
+    slam/           - Tracker, mapper, SLAM pipeline
+    language/       - CLIP extractor, SAM extractor, feature maps, autoencoder
+    dynamic/        - Dynamic object detection (Week 3)
+    data/           - Dataset loaders (Replica)
+    utils/          - Camera utilities, config loader
+  configs/          - YAML configuration files
+  scripts/          - Test and evaluation scripts
+  notebooks/        - Colab notebook
+  checkpoints/      - Model weights (not tracked in git)
+  data/             - Datasets (not tracked in git)

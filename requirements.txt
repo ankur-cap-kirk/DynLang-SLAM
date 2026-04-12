@@ -1,0 +1,44 @@
+# ============================================================
+# DynLang-SLAM Dependencies
+# ============================================================
+# IMPORTANT: Install PyTorch with CUDA FIRST, before this file:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#
+# Then install diff-gaussian-rasterization:
+#   pip install git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
+#
+# Then install this file:
+#   pip install -r requirements.txt
+# ============================================================
+
+# Core (torch/torchvision already installed via CUDA command above)
+numpy>=1.24.0
+scipy>=1.11.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+tqdm>=4.66.0
+matplotlib>=3.8.0
+# open3d>=0.18.0  # SKIP: no Python 3.14 support yet. Install later if needed.
+
+# Language Features
+open-clip-torch>=2.24.0
+# segment-anything installed via setup script (git+https)
+
+# Dynamic Object Detection
+ultralytics>=8.1.0
+
+# Config & Logging
+omegaconf>=2.3.0
+tensorboard>=2.15.0
+
+# Evaluation
+evo>=1.25.0
+lpips>=0.1.4
+scikit-learn>=1.3.0
+scikit-image>=0.22.0
+
+# Utilities
+einops>=0.7.0
+plyfile>=1.0.0
+trimesh>=4.0.0
+imageio>=2.33.0
