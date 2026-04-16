@@ -8,7 +8,8 @@ import sys
 import os
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, PROJECT_ROOT)
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 import torch
@@ -29,14 +30,14 @@ print(f"Language SLAM Test: {SCENE} ({N_FRAMES} frames)")
 print("=" * 60)
 
 # Load config
-cfg = load_config("configs/default.yaml", [])
+cfg = load_config(os.path.join(PROJECT_ROOT, "configs", "default.yaml"), [])
 cfg.dataset.scene = SCENE
 cfg.dataset.max_frames = N_FRAMES
 cfg.language.extract_every_n = 2  # extract every other keyframe
 cfg.language.autoencoder.warmup_frames = 15  # lower warmup for short test
 
 # Dataset
-dataset_path = Path(cfg.dataset.path) / SCENE
+dataset_path = Path(PROJECT_ROOT) / cfg.dataset.path / SCENE
 dataset = ReplicaDataset(
     data_dir=str(dataset_path),
     height=cfg.dataset.image_height,

@@ -38,3 +38,10 @@ output.txt
 
 # Report extracted duplicates
 report/extracted/
+
+# Editor / local workspace
+.obsidian/
+
+# Personal class materials (not for public repo)
+discussion_post.md
+reply_*.md

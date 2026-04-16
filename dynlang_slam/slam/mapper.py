@@ -34,6 +34,7 @@ class Mapper:
         densify_interval: int = 5,
         densify_max_scale: float = 0.05,
         iso_reg_weight: float = 0.05,
+        use_soft_dynamic: bool = False,
     ):
         self.renderer = renderer
         self.iso_reg_weight = iso_reg_weight
@@ -58,6 +59,7 @@ class Mapper:
         self.densify_grad_thresh = densify_grad_thresh
         self.densify_interval = densify_interval
         self.densify_max_scale = densify_max_scale
+        self.use_soft_dynamic = use_soft_dynamic
         self._map_call_count = 0
 
     def map(
@@ -71,6 +73,7 @@ class Mapper:
         add_new: bool = True,
         lang_feature_maps: list[dict] = None,
         lang_weight: float = 0.0,
+        masks: list[torch.Tensor] = None,
     ) -> dict:
         """Optimize Gaussian map parameters using keyframe observations.
 
@@ -93,9 +96,11 @@ class Mapper:
         # Add new Gaussians for unobserved regions (before optimization)
         total_added = 0
         if add_new:
-            for frame, pose in zip(frames, poses):
+            for fi, (frame, pose) in enumerate(zip(frames, poses)):
+                frame_mask = masks[fi] if masks is not None and fi < len(masks) else None
                 n_added = self._expand_map(
-                    gaussian_map, frame, pose, K, width, height, fx, fy, cx, cy
+                    gaussian_map, frame, pose, K, width, height, fx, fy, cx, cy,
+                    mask=frame_mask,
                 )
                 total_added += n_added
 
@@ -155,8 +160,21 @@ class Mapper:
                     render_lang=use_lang, downscale=ds,
                 )
 
+                # Dynamic mask: downscale to match render resolution
+                frame_mask = None
+                if masks is not None and fi < len(masks) and masks[fi] is not None:
+                    if ds > 1:
+                        frame_mask = torch.nn.functional.interpolate(
+                            masks[fi].unsqueeze(0).unsqueeze(0),
+                            scale_factor=1.0/ds, mode='nearest',
+                        ).squeeze(0).squeeze(0)
+                    else:
+                        frame_mask = masks[fi]
+
                 loss, loss_dict = compute_losses(
-                    rendered, gt_rgb, gt_depth, self.loss_weights
+                    rendered, gt_rgb, gt_depth, self.loss_weights,
+                    mask=frame_mask,
+                    use_soft_dynamic=self.use_soft_dynamic,
                 )
                 iter_loss = iter_loss + loss
 
@@ -193,6 +211,19 @@ class Mapper:
 
             total_loss = iter_loss.item()
             loss_info = loss_dict
+
+        # Mark Gaussians contaminated by dynamic objects
+        if masks is not None:
+            with torch.no_grad():
+                for fi, (frame, pose) in enumerate(zip(frames, poses)):
+                    if fi >= len(masks) or masks[fi] is None:
+                        continue
+                    if (masks[fi] < 0.5).sum() == 0:
+                        continue  # no dynamic pixels in this frame
+                    viewmat = fast_se3_inverse(pose)
+                    gaussian_map.mark_contaminated(
+                        viewmat, K, width, height, masks[fi],
+                    )
 
         # Densify based on position gradients + rendering error (HF-SLAM style)
         self._map_call_count += 1
@@ -261,6 +292,7 @@ class Mapper:
         width: int,
         height: int,
         fx: float, fy: float, cx: float, cy: float,
+        mask: torch.Tensor = None,
     ) -> int:
         """Add new Gaussians for regions not covered by existing map.
 
@@ -277,6 +309,10 @@ class Mapper:
             rgb = frame["rgb"].permute(1, 2, 0)  # (H, W, 3)
 
             unmapped = (alpha < self.new_gaussian_thresh) & (depth > 0)
+
+            # Exclude dynamic pixels from expansion
+            if mask is not None:
+                unmapped = unmapped & (mask > 0.5)
 
             if unmapped.sum() == 0:
                 return 0

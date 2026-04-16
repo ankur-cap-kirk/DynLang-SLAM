@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DynLang-SLAM: Dynamic Masking Improvement Plan</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.6; padding: 2rem; max-width: 1100px; margin: 0 auto; }
+  h1 { color: #fff; font-size: 2rem; margin-bottom: 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.4rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { color: var(--purple); font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  .subtitle { color: #8b949e; font-size: 1rem; margin-bottom: 2rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+  .alert { border-left: 4px solid var(--red); }
+  .success { border-left: 4px solid var(--green); }
+  .info { border-left: 4px solid var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-weight: 600; }
+  .bad { color: var(--red); font-weight: 600; }
+  .good { color: var(--green); font-weight: 600; }
+  .mid { color: var(--yellow); font-weight: 600; }
+  code { background: #1f2937; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.9rem; }
+  pre { background: #1f2937; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; margin: 0.5rem 0; }
+  .fix-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+  .fix-num { background: var(--accent); color: #000; font-weight: 700; font-size: 0.85rem; padding: 0.2rem 0.6rem; border-radius: 4px; }
+  .impact-high { background: var(--green); color: #000; font-weight: 600; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; }
+  .impact-med { background: var(--yellow); color: #000; font-weight: 600; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; }
+  .impact-easy { background: var(--purple); color: #000; font-weight: 600; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; }
+  .timeline { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+  .step { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; flex: 1; min-width: 140px; text-align: center; }
+  .step .num { color: var(--accent); font-weight: 700; font-size: 1.2rem; }
+  .step .label { font-size: 0.85rem; color: #8b949e; }
+  .step .time { color: var(--green); font-size: 0.8rem; }
+  .arrow { display: flex; align-items: center; color: #8b949e; font-size: 1.2rem; }
+</style>
+</head>
+<body>
+
+<h1>Dynamic Masking: From 35cm to SOTA</h1>
+<p class="subtitle">DynLang-SLAM Research Report &mdash; BONN person_tracking sequence</p>
+
+<div class="card alert">
+  <h3>The Problem</h3>
+  <p>Our binary YOLO + temporal filter dynamic masking <strong>makes ATE worse</strong>:</p>
+  <table>
+    <tr><th>Mode</th><th>ATE RMSE</th><th>Time/frame</th></tr>
+    <tr><td>Static (no masking)</td><td class="bad">35.03 cm</td><td>2.0s</td></tr>
+    <tr><td>Dynamic (YOLO mask)</td><td class="bad">42.32 cm</td><td>2.01s</td></tr>
+    <tr><td>SOTA: BDGS-SLAM</td><td class="good">4.03 cm</td><td>&mdash;</td></tr>
+    <tr><td>SOTA: DG-SLAM</td><td class="good">4.73 cm</td><td>&mdash;</td></tr>
+  </table>
+  <p style="margin-top:0.75rem; color: var(--red);">Binary masking removes 11% of pixels &rarr; less tracking signal &rarr; noisier poses &rarr; worse ATE</p>
+</div>
+
+<h2>Root Cause Analysis</h2>
+<div class="card info">
+  <ol style="padding-left: 1.2rem;">
+    <li><strong>Signal loss</strong>: Removing pixels reduces photometric + depth gradients for pose optimization</li>
+    <li><strong>No geometric verification</strong>: YOLO masks are semantic-only &mdash; they don't correspond to actual motion</li>
+    <li><strong>Tracker already tolerates dynamics</strong>: L1 loss + coarse-to-fine is somewhat robust to outliers; aggressive masking hurts more</li>
+    <li><strong>No contamination cleanup</strong>: Dynamic pixels leak into Gaussians before detection starts, persisting forever</li>
+  </ol>
+</div>
+
+<h2>6 Concrete Fixes</h2>
+
+<!-- FIX 1 -->
+<div class="card">
+  <div class="fix-header">
+    <span class="fix-num">FIX 1</span>
+    <span class="impact-high">HIGHEST IMPACT</span>
+    <strong>Depth Warp Mask</strong> <span style="color:#8b949e">(from DG-SLAM, NeurIPS 2024)</span>
+  </div>
+  <p>Project depth between keyframes and check for residuals. Moving objects physically change depth; static walls don't.</p>
+  <pre>def compute_depth_warp_mask(depth_cur, depth_prev, pose_cur, pose_prev, K):
+    # Unproject current pixels to 3D
+    pts_3d = unproject(depth_cur, K)
+    # Transform to previous frame
+    T_rel = pose_prev.inverse() @ pose_cur
+    pts_prev = transform(pts_3d, T_rel)
+    # Project back and compare depth
+    depth_sampled = sample_depth(depth_prev, project(pts_prev, K))
+    residual = (pts_prev.z - depth_sampled).abs()
+    return residual > 0.1 * depth_cur  # relative threshold</pre>
+  <p><strong>Why</strong>: This is the #1 contributor to DG-SLAM's 4.73cm result. Combined with semantic: <code>final = depth_warp | yolo_mask</code></p>
+  <p style="color:#8b949e">~50 lines in tracker.py | ~1-2 hours</p>
+</div>
+
+<!-- FIX 2 -->
+<div class="card">
+  <div class="fix-header">
+    <span class="fix-num">FIX 2</span>
+    <span class="impact-high">HIGH IMPACT</span>
+    <strong>Soft Per-Pixel Weighting</strong> <span style="color:#8b949e">(from DGS-SLAM)</span>
+  </div>
+  <p>Replace binary mask with continuous weights based on photometric residual histogram. 90th percentile threshold with sigmoid falloff.</p>
+  <pre>residual = (rendered_rgb - gt_rgb).abs().mean(dim=0)  # (H, W)
+threshold = torch.quantile(residual, 0.90)
+weights = 1.0 - torch.sigmoid(10 * (residual - threshold) / threshold)
+loss = (weights * pixel_loss).mean()</pre>
+  <p><strong>Why</strong>: Dynamic pixels have high residual. Down-weight them smoothly instead of removing entirely &rarr; preserves tracking signal.</p>
+  <p style="color:#8b949e">~30 lines in losses.py | ~30 min</p>
+</div>
+
+<!-- FIX 3 -->
+<div class="card">
+  <div class="fix-header">
+    <span class="fix-num">FIX 3</span>
+    <span class="impact-high">HIGH IMPACT</span>
+    <strong>Constant-Velocity Pose Init</strong>
+  </div>
+  <p>Use motion model extrapolation instead of identity for initial pose guess. Camera motion is smooth &mdash; better init = fewer iterations = less drift.</p>
+  <pre>if len(pose_history) >= 2:
+    delta = pose_history[-1] @ pose_history[-2].inverse()
+    initial_pose = delta @ pose_history[-1]  # extrapolate</pre>
+  <p><strong>Why</strong>: Better initialization means fewer iterations to converge and less chance of local minima. DG-SLAM uses DROID-SLAM for this; constant-velocity is simpler.</p>
+  <p style="color:#8b949e">~15 lines in tracker.py | ~15 min</p>
+</div>
+
+<!-- FIX 4 -->
+<div class="card">
+  <div class="fix-header">
+    <span class="fix-num">FIX 4</span>
+    <span class="impact-med">MEDIUM IMPACT</span>
+    <strong>Accumulated Opacity Mask</strong> <span style="color:#8b949e">(from DG-SLAM Eq. 9)</span>
+  </div>
+  <p>Only track against pixels where Gaussians have high accumulated opacity (well-reconstructed regions).</p>
+  <pre>opacity_map = rendered["opacity"]  # from splatting
+reliable_mask = opacity_map > 0.95
+mask = mask & reliable_mask if mask is not None else reliable_mask</pre>
+  <p><strong>Why</strong>: Low-opacity regions are poorly reconstructed (often dynamics or unseen areas). Tracking against them adds noise.</p>
+  <p style="color:#8b949e">~5 lines in tracker.py | ~15 min</p>
+</div>
+
+<!-- FIX 5 -->
+<div class="card">
+  <div class="fix-header">
+    <span class="fix-num">FIX 5</span>
+    <span class="impact-med">MEDIUM IMPACT</span>
+    <strong>Bayesian Per-Gaussian Belief</strong> <span style="color:#8b949e">(from BDGS-SLAM)</span>
+  </div>
+  <p>Each Gaussian maintains a dynamic probability &beta; &isin; [0,1] with temporal decay. Dynamic Gaussians get their opacity suppressed: <code>effective_opacity = opacity * (1 - &beta;)</code></p>
+  <p><strong>Why</strong>: Soft suppression instead of hard pruning. Gaussians briefly occluded by a person recover via decay. This is how BDGS-SLAM achieves 4.03cm.</p>
+  <p style="color:#8b949e">~40 lines in gaussians.py | ~1-2 hours</p>
+</div>
+
+<!-- FIX 6 -->
+<div class="card">
+  <div class="fix-header">
+    <span class="fix-num">FIX 6</span>
+    <span class="impact-easy">EASY WIN</span>
+    <strong>Depth-Verified Semantic Mask</strong>
+  </div>
+  <p>Only trust YOLO detections where depth actually changed between frames. Stationary objects that YOLO calls "dynamic" get unmasked.</p>
+  <pre>for det in detections:
+    depth_diff = (cur_depth[det["mask"]] - prev_depth[det["mask"]]).abs().mean()
+    if depth_diff < 0.05:  # less than 5cm = not actually moving
+        det["mask"][:] = False</pre>
+  <p><strong>Why</strong>: Prevents false positives from stationary people, furniture misclassified as dynamic, etc.</p>
+  <p style="color:#8b949e">~10 lines in pipeline.py | ~10 min</p>
+</div>
+
+<h2>Implementation Order</h2>
+<div class="timeline">
+  <div class="step"><div class="num">1</div><div class="label">FIX 6: Depth-verify</div><div class="time">10 min</div></div>
+  <div class="arrow">&rarr;</div>
+  <div class="step"><div class="num">2</div><div class="label">FIX 3: Velocity init</div><div class="time">15 min</div></div>
+  <div class="arrow">&rarr;</div>
+  <div class="step"><div class="num">3</div><div class="label">FIX 2: Soft weights</div><div class="time">30 min</div></div>
+  <div class="arrow">&rarr;</div>
+  <div class="step"><div class="num">4</div><div class="label">FIX 1: Depth warp</div><div class="time">1-2 hrs</div></div>
+  <div class="arrow">&rarr;</div>
+  <div class="step"><div class="num">5</div><div class="label">FIX 4: Opacity</div><div class="time">15 min</div></div>
+  <div class="arrow">&rarr;</div>
+  <div class="step"><div class="num">6</div><div class="label">FIX 5: Bayesian</div><div class="time">1-2 hrs</div></div>
+</div>
+
+<div class="card success">
+  <h3>Expected Results</h3>
+  <table>
+    <tr><th>After implementing...</th><th>Expected ATE</th></tr>
+    <tr><td>FIX 6 + FIX 3 (quick wins)</td><td class="mid">~25-30 cm</td></tr>
+    <tr><td>+ FIX 2 (soft weights)</td><td class="mid">~18-25 cm</td></tr>
+    <tr><td>+ FIX 1 (depth warp mask)</td><td class="good">~8-15 cm</td></tr>
+    <tr><td>+ FIX 4 + FIX 5 (full pipeline)</td><td class="good">~5-8 cm</td></tr>
+  </table>
+</div>
+
+<h2>Key Papers</h2>
+<ul style="padding-left: 1.2rem;">
+  <li><a href="https://arxiv.org/abs/2411.08373" style="color:var(--accent)">DG-SLAM</a> (NeurIPS 2024) &mdash; Depth warp mask, coarse-to-fine tracking, opacity mask</li>
+  <li><a href="https://arxiv.org/html/2503.11921" style="color:var(--accent)">BDGS-SLAM</a> (2025) &mdash; Bayesian per-Gaussian belief, soft opacity suppression</li>
+  <li><a href="https://github.com/junzhejiang16/DGS-SLAM" style="color:var(--accent)">DGS-SLAM</a> (2024) &mdash; Photometric residual histogram, robust outlier detection</li>
+</ul>
+
+<p style="margin-top: 2rem; color: #8b949e; text-align: center; font-size: 0.85rem;">
+  DynLang-SLAM Research &mdash; April 2026
+</p>
+</body>
+</html>

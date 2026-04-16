@@ -54,6 +54,12 @@ class GaussianMap(nn.Module):
 
         self._num_gaussians = 0
 
+        # Contamination tracking for dynamic objects (no gradients)
+        self.contamination_count = torch.zeros(0, dtype=torch.long, device=device)
+
+        # Bayesian dynamic belief: per-Gaussian probability of being dynamic (BDGS-SLAM)
+        self.dynamic_belief = torch.zeros(0, dtype=torch.float32, device=device)
+
     @property
     def num_gaussians(self) -> int:
         return self._num_gaussians
@@ -146,6 +152,10 @@ class GaussianMap(nn.Module):
             torch.zeros(N, self.lang_feat_dim, device=self.device)
         )
 
+        # Contamination tracking: all clean initially
+        self.contamination_count = torch.zeros(N, dtype=torch.long, device=self.device)
+        self.dynamic_belief = torch.zeros(N, dtype=torch.float32, device=self.device)
+
         self._num_gaussians = N
         print(f"Initialized {N} Gaussians from depth map")
 
@@ -202,6 +212,16 @@ class GaussianMap(nn.Module):
         self.colors = nn.Parameter(torch.cat([self.colors.data, new_color_params]))
         self.lang_feats = nn.Parameter(torch.cat([self.lang_feats.data, new_lang]))
 
+        # Extend contamination tracking
+        self.contamination_count = torch.cat([
+            self.contamination_count,
+            torch.zeros(M, dtype=torch.long, device=device),
+        ])
+        self.dynamic_belief = torch.cat([
+            self.dynamic_belief,
+            torch.zeros(M, dtype=torch.float32, device=device),
+        ])
+
         self._num_gaussians += M
         return M
 
@@ -223,6 +243,8 @@ class GaussianMap(nn.Module):
         self.opacities = nn.Parameter(self.opacities.data[keep])
         self.colors = nn.Parameter(self.colors.data[keep])
         self.lang_feats = nn.Parameter(self.lang_feats.data[keep])
+        self.contamination_count = self.contamination_count[keep]
+        self.dynamic_belief = self.dynamic_belief[keep]
 
         self._num_gaussians -= n_removed
         return n_removed
@@ -325,28 +347,110 @@ class GaussianMap(nn.Module):
                 all_colors = all_colors[final_indices]
                 all_lang = all_lang[final_indices]
 
+            # Extend contamination counts and dynamic belief for clones/splits
+            contam_list = [self.contamination_count]
+            belief_list = [self.dynamic_belief]
+            if n_clone > 0:
+                contam_list.append(self.contamination_count[clone_mask])
+                belief_list.append(self.dynamic_belief[clone_mask])
+            if n_split > 0:
+                parent_contam = self.contamination_count[split_mask]
+                parent_belief = self.dynamic_belief[split_mask]
+                contam_list.extend([parent_contam, parent_contam])
+                belief_list.extend([parent_belief, parent_belief])
+            all_contam = torch.cat(contam_list)
+            all_belief = torch.cat(belief_list)
+            if n_split > 0:
+                all_contam = all_contam[final_indices]
+                all_belief = all_belief[final_indices]
+
             self.means = nn.Parameter(all_means)
             self.scales = nn.Parameter(all_scales)
             self.quats = nn.Parameter(all_quats)
             self.opacities = nn.Parameter(all_opacities)
             self.colors = nn.Parameter(all_colors)
             self.lang_feats = nn.Parameter(all_lang)
+            self.contamination_count = all_contam
+            self.dynamic_belief = all_belief
             self._num_gaussians = len(all_means)
 
         return {"split": n_split, "cloned": n_clone}
 
-    def get_activated_params(self) -> dict:
+    def update_dynamic_belief(
+        self,
+        viewmat: torch.Tensor,
+        K: torch.Tensor,
+        width: int,
+        height: int,
+        mask: torch.Tensor,
+        increase: float = 0.2,
+        decay: float = 0.07,
+    ) -> None:
+        """Update per-Gaussian dynamic belief using the current frame's mask.
+
+        Gaussians projecting into dynamic regions have their belief increased.
+        All beliefs decay each frame so briefly occluded Gaussians recover.
+
+        Args:
+            viewmat: (4, 4) world-to-camera
+            K: (3, 3) intrinsics
+            width, height: image dimensions
+            mask: (H, W) float, 1=static, 0=dynamic
+            increase: belief increment for Gaussians in dynamic regions
+            decay: belief decay per frame for all Gaussians
+        """
+        if self._num_gaussians == 0:
+            return
+
+        with torch.no_grad():
+            # Decay all beliefs toward 0
+            self.dynamic_belief = (self.dynamic_belief - decay).clamp(min=0.0)
+
+            # Project means to 2D
+            R = viewmat[:3, :3]
+            t = viewmat[:3, 3]
+            means_cam = self.means.data @ R.T + t.unsqueeze(0)
+            z = means_cam[:, 2]
+
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            u = (means_cam[:, 0] * fx / z + cx).long()
+            v = (means_cam[:, 1] * fy / z + cy).long()
+
+            valid = (z > 0.01) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+            if valid.sum() == 0:
+                return
+
+            mask_dev = mask.to(self.device) if mask.device != self.device else mask
+            is_dynamic = mask_dev[v[valid], u[valid]] < 0.5
+            dyn_indices = torch.where(valid)[0][is_dynamic]
+
+            if dyn_indices.shape[0] > 0:
+                self.dynamic_belief[dyn_indices] = (
+                    self.dynamic_belief[dyn_indices] + increase
+                ).clamp(max=1.0)
+
+    def get_activated_params(self, suppress_dynamic: bool = True) -> dict:
         """Get activated (post-nonlinearity) Gaussian parameters.
+
+        Args:
+            suppress_dynamic: if True, scale opacity by (1 - dynamic_belief)
 
         Returns:
             dict with activated means, scales (exp), quats (normalized),
             opacities (sigmoid), colors, lang_feats
         """
+        opacities = torch.sigmoid(self.opacities)
+        if suppress_dynamic and self.dynamic_belief.shape[0] == opacities.shape[0]:
+            belief = self.dynamic_belief.unsqueeze(-1)  # (N, 1)
+            if belief.any():
+                opacities = opacities * (1.0 - belief)
+
         return {
             "means": self.means,
             "scales": torch.exp(self.scales),
             "quats": torch.nn.functional.normalize(self.quats, dim=-1),
-            "opacities": torch.sigmoid(self.opacities),
+            "opacities": opacities,
             "colors": self.colors if self.sh_degree == 0 else self.colors,
             "lang_feats": self.lang_feats,
         }
@@ -360,6 +464,8 @@ class GaussianMap(nn.Module):
             "opacities": self.opacities.data.cpu(),
             "colors": self.colors.data.cpu(),
             "lang_feats": self.lang_feats.data.cpu(),
+            "contamination_count": self.contamination_count.cpu(),
+            "dynamic_belief": self.dynamic_belief.cpu(),
             "sh_degree": self.sh_degree,
             "lang_feat_dim": self.lang_feat_dim,
             "num_gaussians": self._num_gaussians,
@@ -373,4 +479,87 @@ class GaussianMap(nn.Module):
         self.opacities = nn.Parameter(state["opacities"].to(self.device))
         self.colors = nn.Parameter(state["colors"].to(self.device))
         self.lang_feats = nn.Parameter(state["lang_feats"].to(self.device))
+        self.contamination_count = state.get(
+            "contamination_count",
+            torch.zeros(state["num_gaussians"], dtype=torch.long, device=self.device),
+        ).to(self.device)
+        self.dynamic_belief = state.get(
+            "dynamic_belief",
+            torch.zeros(state["num_gaussians"], dtype=torch.float32, device=self.device),
+        ).to(self.device)
         self._num_gaussians = state["num_gaussians"]
+
+    def mark_contaminated(
+        self,
+        viewmat: torch.Tensor,
+        K: torch.Tensor,
+        width: int,
+        height: int,
+        mask: torch.Tensor,
+    ) -> int:
+        """Increment contamination count for Gaussians projecting into dynamic pixels.
+
+        Projects all Gaussian means to 2D, checks which fall inside dynamic
+        regions of the mask, and increments their contamination count.
+
+        Args:
+            viewmat: (4, 4) world-to-camera transform
+            K: (3, 3) camera intrinsics
+            width, height: image dimensions
+            mask: (H, W) float — 1=static, 0=dynamic
+
+        Returns:
+            Number of Gaussians marked as contaminated
+        """
+        if self._num_gaussians == 0:
+            return 0
+
+        with torch.no_grad():
+            # Project Gaussian means to 2D pixel coordinates
+            R = viewmat[:3, :3]
+            t = viewmat[:3, 3]
+            means_cam = self.means.data @ R.T + t.unsqueeze(0)  # (N, 3)
+            z = means_cam[:, 2]
+
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            u = (means_cam[:, 0] * fx / z + cx).long()
+            v = (means_cam[:, 1] * fy / z + cy).long()
+
+            # Bounds check
+            valid = (z > 0.01) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+
+            if valid.sum() == 0:
+                return 0
+
+            u_valid = u[valid]
+            v_valid = v[valid]
+
+            # Check which valid Gaussians project into dynamic regions
+            mask_dev = mask.to(self.device) if mask.device != self.device else mask
+            is_dynamic = mask_dev[v_valid, u_valid] < 0.5
+            contaminated_indices = torch.where(valid)[0][is_dynamic]
+
+            n_contaminated = contaminated_indices.shape[0]
+            if n_contaminated > 0:
+                self.contamination_count[contaminated_indices] += 1
+
+            return n_contaminated
+
+    def cleanup_contaminated(self, threshold: int = 3) -> int:
+        """Remove Gaussians that have been repeatedly contaminated by dynamic objects.
+
+        Args:
+            threshold: minimum contamination count to trigger removal
+
+        Returns:
+            Number of Gaussians removed
+        """
+        if self._num_gaussians == 0:
+            return 0
+
+        prune_mask = self.contamination_count >= threshold
+        n = prune_mask.sum().item()
+        if n > 0:
+            self.prune(prune_mask)
+        return n

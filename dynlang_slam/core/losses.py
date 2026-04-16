@@ -114,12 +114,45 @@ def language_loss(
     return loss_l1 + loss_cos
 
 
+def compute_soft_dynamic_weights(
+    pred_rgb: torch.Tensor,
+    gt_rgb: torch.Tensor,
+    quantile: float = 0.90,
+    sharpness: float = 10.0,
+) -> torch.Tensor:
+    """Compute soft per-pixel weights from photometric residuals (DGS-SLAM).
+
+    Pixels with high residual (likely dynamic) get down-weighted smoothly
+    instead of being removed entirely, preserving tracking signal.
+
+    Args:
+        pred_rgb: (H, W, 3) rendered RGB
+        gt_rgb: (H, W, 3) ground truth RGB
+        quantile: residual percentile above which pixels are down-weighted
+        sharpness: sigmoid steepness (higher = sharper transition)
+
+    Returns:
+        (H, W) float weights in [0, 1], 1 = fully trusted
+    """
+    with torch.no_grad():
+        residual = (pred_rgb - gt_rgb).abs().mean(dim=-1)  # (H, W)
+        flat = residual.reshape(-1)
+        k = int(flat.shape[0] * quantile)
+        threshold = flat.kthvalue(k).values.clamp(min=1e-4)
+        weights = 1.0 - torch.sigmoid(sharpness * (residual - threshold) / threshold)
+    return weights
+
+
 def compute_losses(
     rendered: dict,
     gt_rgb: torch.Tensor,
     gt_depth: torch.Tensor,
     weights: dict,
     mask: torch.Tensor = None,
+    use_soft_dynamic: bool = False,
+    use_huber: bool = True,
+    huber_rgb_delta: float = 0.05,
+    huber_depth_delta: float = 0.1,
 ) -> tuple[torch.Tensor, dict]:
     """Compute combined tracking/mapping loss.
 
@@ -129,6 +162,7 @@ def compute_losses(
         gt_depth: (H, W) or (H, W, 1) ground truth depth in meters
         weights: dict with 'rgb_weight', 'depth_weight', 'ssim_weight'
         mask: optional (H, W) binary mask (1 = valid, 0 = ignore)
+        use_soft_dynamic: if True, apply residual-based soft weighting
 
     Returns:
         total_loss, loss_dict with individual components
@@ -137,8 +171,9 @@ def compute_losses(
     pred_depth = rendered["depth"]   # (H, W, 1)
     alpha = rendered["alpha"]        # (H, W, 1)
 
-    if gt_depth.dim() == 3:
-        gt_depth = gt_depth.squeeze(0)  # (H, W)
+    # Ensure gt_depth is 2D (H, W) — handle both (1, H, W) and (H, W, 1)
+    while gt_depth.dim() > 2:
+        gt_depth = gt_depth.squeeze(-1) if gt_depth.shape[-1] == 1 else gt_depth.squeeze(0)
     if pred_depth.dim() == 3:
         pred_depth = pred_depth.squeeze(-1)  # (H, W)
     if alpha.dim() == 3:
@@ -146,23 +181,37 @@ def compute_losses(
     else:
         alpha_2d = alpha
 
+    # Soft dynamic weighting: down-weight high-residual pixels
+    soft_w = None
+    if use_soft_dynamic:
+        soft_w = compute_soft_dynamic_weights(pred_rgb, gt_rgb)
+
     # Depth validity mask: only where GT depth is valid AND map has Gaussians
-    # Without alpha masking, the optimizer is biased toward old poses because
-    # new viewpoints see unmapped regions (alpha=0, depth=0) which create
-    # large depth errors against valid GT depth, penalizing correct poses.
     depth_valid = ((gt_depth > 0) & (alpha_2d > 0.5)).float()
     if mask is not None:
         depth_valid = depth_valid * mask
+    if soft_w is not None:
+        depth_valid = depth_valid * soft_w
 
     # RGB loss: also weight by alpha to reduce influence of unmapped regions
     alpha_rgb = alpha_2d.unsqueeze(-1).expand_as(pred_rgb)
     rgb_mask = alpha_rgb
     if mask is not None:
         rgb_mask = rgb_mask * mask.unsqueeze(-1).expand_as(pred_rgb)
-    loss_rgb = l1_loss(pred_rgb, gt_rgb, rgb_mask)
+    if soft_w is not None:
+        rgb_mask = rgb_mask * soft_w.unsqueeze(-1).expand_as(pred_rgb)
+    # RGB loss: Huber gives L2-like gradient near optimum (better refinement)
+    # and L1-like robustness for outliers (missed dynamics, occlusions)
+    if use_huber:
+        loss_rgb = huber_loss(pred_rgb, gt_rgb, rgb_mask, delta=huber_rgb_delta)
+    else:
+        loss_rgb = l1_loss(pred_rgb, gt_rgb, rgb_mask)
 
     # Depth loss (only where GT depth is valid AND map has coverage)
-    loss_depth = l1_loss(pred_depth, gt_depth, depth_valid)
+    if use_huber:
+        loss_depth = huber_loss(pred_depth, gt_depth, depth_valid, delta=huber_depth_delta)
+    else:
+        loss_depth = l1_loss(pred_depth, gt_depth, depth_valid)
 
     # SSIM loss
     loss_ssim = ssim_loss(pred_rgb, gt_rgb)

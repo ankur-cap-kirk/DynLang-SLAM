@@ -15,6 +15,10 @@ def load_config(config_path: str = "configs/default.yaml", overrides: list[str] 
     Returns:
         Merged configuration as DictConfig
     """
+    config_path = Path(config_path)
+    if not config_path.is_absolute():
+        project_root = Path(__file__).resolve().parent.parent.parent
+        config_path = project_root / config_path
     base_cfg = OmegaConf.load(config_path)
 
     if overrides:

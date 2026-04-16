@@ -1,0 +1,356 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+
+\definecolor{improved}{rgb}{0.0, 0.5, 0.0}
+\definecolor{regressed}{rgb}{0.8, 0.0, 0.0}
+\definecolor{neutral}{rgb}{0.4, 0.4, 0.4}
+
+\title{DynLang-SLAM: Tracking Pipeline Tuning Report\\
+\large Systematic Ablation Study on Replica Dataset}
+\author{Ankur Guruprasad\\
+EEE 515 -- Computer Vision, Arizona State University\\
+\texttt{agurupr6@asu.edu}}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+This report documents the systematic parameter tuning and algorithmic improvements applied to the tracking pipeline of DynLang-SLAM, a 3D Gaussian Splatting-based visual SLAM system. All experiments were conducted on the Replica dataset~\cite{replica} using three scenes (\texttt{room0}, \texttt{room1}, \texttt{room2}) with 200 frames each. The primary metric is Absolute Trajectory Error (ATE RMSE) in centimeters.
+
+\subsection{System Overview}
+The tracking pipeline optimizes a 6-DOF camera pose per frame by minimizing a weighted combination of photometric (L1 + SSIM) and geometric (depth L1) losses against a differentiable Gaussian splatting map rendered via \texttt{gsplat}~\cite{gsplat}. The pose is parameterized as a quaternion (4D) + translation (3D) and optimized with Adam for a fixed number of iterations.
+
+\subsection{Baseline Configuration}
+\begin{itemize}
+    \item Tracking iterations: 50
+    \item Pose learning rate: 0.002 (constant)
+    \item Loss weights: RGB=0.5, Depth=1.0, SSIM=0.2
+    \item Render downscale: 1 (full resolution 680$\times$1200)
+    \item Keyframe interval: every 5 frames
+    \item Densification: gradient threshold 0.0002, interval 10
+\end{itemize}
+
+\section{Initial Baseline Results}
+
+Table~\ref{tab:initial} shows the original ATE values before any tuning.
+
+\begin{table}[h]
+\centering
+\caption{Initial baseline ATE (RMSE, cm) on Replica scenes.}
+\label{tab:initial}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scene} & \textbf{ATE (cm)} & \textbf{PSNR} & \textbf{Target} \\
+\midrule
+room0 & 0.72 & -- & $<$1.0 \\
+room1 & 10.34 & -- & $<$5.0 \\
+room2 & 18.82 & -- & $<$5.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Methods Explored}
+
+\subsection{Depth Weight Tuning}
+
+We varied the depth loss weight to find the optimal balance between geometric and photometric alignment.
+
+\begin{table}[h]
+\centering
+\caption{Depth weight ablation (ATE RMSE in cm).}
+\label{tab:depth_weight}
+\begin{tabular}{lccc}
+\toprule
+\textbf{depth\_w} & \textbf{room0} & \textbf{room1} & \textbf{room2} \\
+\midrule
+1.0 (baseline) & 1.67 & 9.79 & 4.43 \\
+1.2 & 1.43 & 8.15 & 3.73 \\
+1.5 & -- & 9.50 & 1.77 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} \texttt{depth\_w=1.2} is the best universal compromise. Higher values (1.5) dramatically help room2 but catastrophically hurt room1, suggesting scene-dependent sensitivity to depth weighting.
+
+\subsection{Velocity Initialization}
+
+Constant velocity motion model: the initial pose for frame $t$ is extrapolated as $\hat{T}_t = T_{t-1} \cdot (T_{t-2}^{-1} \cdot T_{t-1})$.
+
+\begin{table}[h]
+\centering
+\caption{Velocity initialization ablation.}
+\label{tab:velocity}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Config} & \textbf{room0} & \textbf{room1} \\
+\midrule
+Without velocity init & 1.51 & 15.88 \\
+With velocity init & 1.43 & 10.98 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} Velocity initialization is critical for room1 (31\% improvement) where camera motion is aggressive. Neutral for room0 where motion is smooth.
+
+\subsection{Isotropic Regularization Weight}
+
+Controls the strength of isotropic shape regularization on Gaussian primitives during mapping.
+
+\begin{table}[h]
+\centering
+\caption{Isotropic regularization ablation on room0.}
+\label{tab:iso}
+\begin{tabular}{lc}
+\toprule
+\textbf{iso\_reg\_weight} & \textbf{room0 ATE (cm)} \\
+\midrule
+0.01 & 1.70 \\
+0.05 & 1.43 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} Stronger isotropic regularization (\texttt{iso=0.05}) helps room0 by producing rounder, more stable Gaussians that provide a cleaner tracking signal.
+
+\subsection{Densification}
+
+Tested the effect of removing adaptive Gaussian densification entirely.
+
+\begin{table}[h]
+\centering
+\caption{Densification ablation on room0.}
+\label{tab:densify}
+\begin{tabular}{lc}
+\toprule
+\textbf{Config} & \textbf{room0 ATE (cm)} \\
+\midrule
+With densification & 1.51 \\
+Without densification & 2.33 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} Densification is essential -- without it, the map becomes too sparse for accurate tracking.
+
+\subsection{Motion Magnitude Clamping}
+
+Clamped the predicted velocity-based motion to prevent extreme extrapolations during sudden camera jerks (5$\times$ running average, 0.05m minimum).
+
+\begin{table}[h]
+\centering
+\caption{Motion clamping ablation.}
+\label{tab:clamp}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Config} & \textbf{room0} & \textbf{room1} \\
+\midrule
+Without clamping & 1.67 & 9.79 \\
+With clamping & 1.78 & 7.54 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} Clamping helped room1 (23\% better) but slightly hurt room0. The tradeoff was not favorable, so this was \textbf{removed}.
+
+\subsection{Outlier Rejection with Re-Tracking}
+
+Detected tracking failures via loss thresholds and re-initialized from the previous frame's pose.
+
+\begin{table}[h]
+\centering
+\caption{Outlier rejection ablation.}
+\label{tab:outlier}
+\begin{tabular}{lc}
+\toprule
+\textbf{Config} & \textbf{room1 ATE (cm)} \\
+\midrule
+Without outlier rejection & 9.79 \\
+With outlier rejection & 26.14 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} \textcolor{regressed}{Catastrophic failure.} Re-tracking from the previous pose disrupted the velocity model's accumulated motion estimates, causing cascading drift. \textbf{Removed.}
+
+\section{Failed Approaches from Literature}
+
+Based on techniques from GS-SLAM, TVG-SLAM, CG-SLAM, and others, we implemented and tested several advanced methods. All were evaluated against the tuned baseline (\texttt{depth\_w=1.2}, velocity init, \texttt{iso=0.05}).
+
+\subsection{Coarse-to-Fine Tracking}
+
+Inspired by GS-SLAM~\cite{gsslam}: render at lower resolution for early iterations (coarse pose estimation), then refine at full resolution.
+
+\begin{table}[h]
+\centering
+\caption{Coarse-to-fine tracking ablation on room0.}
+\label{tab:c2f}
+\begin{tabular}{lc}
+\toprule
+\textbf{Config} & \textbf{room0 ATE (cm)} \\
+\midrule
+Baseline (no C2F) & 1.43 \\
+C2F: 4$\times$ ds, 60\% coarse & 4.07 \\
+C2F: 2$\times$ ds, 40\% coarse & 3.41$^*$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+{\small $^*$Combined with other changes (LR scheduling, Huber loss, depth-aware scales).}
+
+\textbf{Finding:} \textcolor{regressed}{Significant regression.} Indoor scenes rely on high-frequency geometric details (chair legs, desk edges). Downscaling destroys the alignment signal that makes the optimizer converge. Unlike outdoor/large-scale scenes where coarse-to-fine helps, Replica rooms require full-resolution tracking throughout.
+
+\subsection{Learning Rate Scheduling}
+
+Applied CosineAnnealingLR to the pose optimizer, decaying from 0.002 to 0.0006 over 50 iterations.
+
+\begin{table}[h]
+\centering
+\caption{LR scheduling ablation on room0.}
+\label{tab:lr_sched}
+\begin{tabular}{lc}
+\toprule
+\textbf{Config} & \textbf{room0 ATE (cm)} \\
+\midrule
+Constant LR (0.002) & 1.77 \\
+CosineAnnealingLR + Huber & 7.03 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Finding:} \textcolor{regressed}{Severe regression.} With only 50 iterations, decaying the learning rate traps the pose in local minima before it can traverse the loss landscape. Constant LR is essential for this short optimization horizon.
+
+\subsection{Huber Depth Loss}
+
+Replaced L1 depth loss with Huber loss ($\delta=0.1$m) for robustness to depth outliers.
+
+\textbf{Finding:} \textcolor{regressed}{Contributed to regression} (tested jointly with LR scheduling). Large depth errors are often the \emph{only} valid signal pulling a wrong pose back to the correct basin of attraction. Clipping these gradients (as Huber does for $|e| > \delta$) prevents convergence.
+
+\subsection{Depth-Aware Scale Initialization}
+
+Initialized Gaussian scales proportional to depth $\times$ pixel footprint instead of a uniform 1cm.
+
+\textbf{Finding:} \textcolor{regressed}{Caused 30\% fewer Gaussians} (69K vs 99K). Larger initial scales meant fewer pixels were flagged as ``unmapped'' during expansion, resulting in a sparser map that hurt tracking.
+
+\section{Successful Method: Dynamic Loss Weighting}
+
+\subsection{Motivation}
+
+Instead of changing the learning rate (which failed), we change the \textbf{loss weight distribution} across tracking iterations. The key insight: depth loss creates a convex basin of attraction for coarse alignment, while RGB/SSIM losses provide high-frequency signal for sub-pixel refinement.
+
+\subsection{Method}
+
+Given base loss weights $w_\text{rgb}$, $w_\text{depth}$, $w_\text{ssim}$, we interpolate per-iteration weights using a linear schedule parameterized by $t = i / (N-1) \in [0, 1]$:
+
+\begin{align}
+    s_\text{depth}(t) &= 2.0 - 1.5t & \text{(2.0 $\to$ 0.5)} \\
+    s_\text{rgb}(t) &= 0.3 + 1.2t & \text{(0.3 $\to$ 1.5)}
+\end{align}
+
+The effective weights at iteration $i$ are:
+\begin{align}
+    w_\text{depth}^{(i)} &= w_\text{depth} \cdot s_\text{depth}(t) \\
+    w_\text{rgb}^{(i)} &= w_\text{rgb} \cdot s_\text{rgb}(t) \\
+    w_\text{ssim}^{(i)} &= w_\text{ssim} \cdot s_\text{rgb}(t)
+\end{align}
+
+This keeps the total gradient magnitude roughly constant (unlike LR scheduling) while steering the gradient \emph{direction} from geometry-dominant to appearance-dominant.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Dynamic loss weighting results (ATE RMSE in cm). All scenes improved.}
+\label{tab:dynamic}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Scene} & \textbf{Original} & \textbf{Tuned BL} & \textbf{Dyn. Wt.} & \textbf{$\Delta$} \\
+\midrule
+room0 & 0.72 & 1.43 & \textcolor{improved}{\textbf{1.12}} & -22\% \\
+room1 & 10.34 & 9.79 & \textcolor{improved}{\textbf{3.32}} & -66\% \\
+room2 & 18.82 & 3.73 & \textcolor{improved}{\textbf{1.50}} & -60\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Analysis}
+
+Dynamic loss weighting achieves the same goal as coarse-to-fine tracking (broad convergence first, then refinement) but through the loss landscape rather than the image resolution:
+
+\begin{itemize}
+    \item \textbf{Early iterations (depth-heavy):} The depth loss provides a smooth, convex error surface that guides the optimizer into the correct basin of attraction, even when the initial pose estimate is far from ground truth.
+    \item \textbf{Late iterations (RGB/SSIM-heavy):} Once the pose is approximately correct, photometric losses exploit high-frequency texture and edge information for sub-pixel alignment that depth sensors cannot provide.
+\end{itemize}
+
+The improvement is especially dramatic for room1 (66\% reduction), which features aggressive camera motion. The depth-heavy initialization phase prevents the catastrophic drift that previously occurred around frames 100--150.
+
+\section{Other Improvements}
+
+Two additional low-risk changes were retained:
+
+\begin{itemize}
+    \item \textbf{Quaternion normalization:} Normalizing the quaternion after each Adam step prevents the quaternion magnitude from drifting, which would otherwise distort Adam's effective learning rate.
+    \item \textbf{Fast SE(3) inverse:} Replacing \texttt{torch.inverse()} with the analytical rigid-body inverse $T^{-1} = [R^\top | -R^\top t]$ in non-differentiable code paths. Mathematically identical, computationally cheaper.
+\end{itemize}
+
+\section{Summary of All Experiments}
+
+Table~\ref{tab:summary} provides a comprehensive overview of every method tested.
+
+\begin{table*}[t]
+\centering
+\caption{Complete ablation summary. All values are ATE RMSE (cm) on 200 frames. Green = improvement, Red = regression.}
+\label{tab:summary}
+\begin{tabular}{llcccl}
+\toprule
+\textbf{\#} & \textbf{Method} & \textbf{room0} & \textbf{room1} & \textbf{room2} & \textbf{Verdict} \\
+\midrule
+0 & Original baseline & 0.72 & 10.34 & 18.82 & Starting point \\
+1 & + depth\_w=1.2 & 1.43 & 8.15 & 3.73 & \textcolor{improved}{Kept} \\
+2 & + Velocity init & 1.43 & 10.98$^\dagger$ & -- & \textcolor{improved}{Kept} \\
+3 & + iso\_reg=0.05 & 1.43 & -- & -- & \textcolor{improved}{Kept} \\
+4 & + Motion clamping & 1.78 & 7.54 & -- & \textcolor{regressed}{Removed} \\
+5 & + Outlier rejection & -- & 26.14 & -- & \textcolor{regressed}{Removed} \\
+6 & + Coarse-to-fine (4$\times$) & 4.07 & -- & -- & \textcolor{regressed}{Removed} \\
+7 & + All changes combined & 3.41 & -- & -- & \textcolor{regressed}{Removed} \\
+8 & + LR scheduling + Huber & 7.03 & -- & -- & \textcolor{regressed}{Removed} \\
+9 & + Quat norm + fast SE(3) & 1.77 & -- & -- & \textcolor{neutral}{Neutral} \\
+10 & + \textbf{Dynamic loss weighting} & \textbf{1.12} & \textbf{3.32} & \textbf{1.50} & \textcolor{improved}{\textbf{Best}} \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+{\small $^\dagger$Without velocity init, room1 = 15.88cm.}
+\end{table*}
+
+\section{Key Lessons Learned}
+
+\begin{enumerate}
+    \item \textbf{One change at a time.} Combining multiple modifications simultaneously caused unpredictable interactions and made debugging impossible. Sequential ablation is essential.
+    \item \textbf{Pose optimization is short and non-convex.} With only 40--50 iterations, techniques that work for long training runs (LR scheduling, Huber loss) can be counterproductive.
+    \item \textbf{Depth is a convex anchor.} Heavy depth weighting in early iterations creates a smooth loss landscape that prevents local minima entrapment.
+    \item \textbf{Resolution matters for indoor scenes.} Coarse-to-fine tracking fails because indoor environments rely on high-frequency geometric details for alignment.
+    \item \textbf{Don't fight the velocity model.} Outlier rejection with re-tracking disrupted the constant velocity assumption, causing cascading drift.
+\end{enumerate}
+
+\section{Next Steps}
+
+\begin{itemize}
+    \item Full 2000-frame evaluation on ASU Sol supercomputer (A100 GPU)
+    \item Push room0 below 1.0cm target (information-driven keyframe selection)
+    \item Language pipeline: CLIP + SAM + autoencoder feature fusion
+    \item Dynamic object masking: YOLOv8 detection and exclusion
+\end{itemize}
+
+\begin{thebibliography}{9}
+\bibitem{replica} Straub et al., ``The Replica Dataset: A Digital Replica of Indoor Spaces,'' \emph{arXiv:1906.05797}, 2019.
+\bibitem{gsplat} Ye et al., ``gsplat: An Open-Source Library for Gaussian Splatting,'' \emph{arXiv:2409.06765}, 2024.
+\bibitem{gsslam} Yan et al., ``GS-SLAM: Dense Visual SLAM with 3D Gaussian Splatting,'' \emph{CVPR}, 2024.
+\end{thebibliography}
+
+\end{document}
