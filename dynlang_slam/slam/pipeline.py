@@ -59,6 +59,9 @@ class SLAMPipeline:
             coarse_to_fine=getattr(cfg.slam.tracking, 'coarse_to_fine', True),
             coarse_downscale=getattr(cfg.slam.tracking, 'coarse_downscale', 4),
             coarse_ratio=getattr(cfg.slam.tracking, 'coarse_ratio', 0.6),
+            use_soft_dynamic=getattr(cfg.dynamic, 'enabled', False) and getattr(cfg.dynamic, 'use_soft_weights', True),
+            early_stop_patience=getattr(cfg.slam.tracking, 'early_stop_patience', 8),
+            early_stop_rel_thresh=getattr(cfg.slam.tracking, 'early_stop_rel_thresh', 0.001),
         )
 
         # Mapper
@@ -83,6 +86,7 @@ class SLAMPipeline:
             densify_grad_thresh=getattr(cfg.gaussians, 'densify_grad_thresh', 0.0002),
             densify_interval=getattr(cfg.gaussians, 'densify_interval', 5),
             densify_max_scale=getattr(cfg.gaussians, 'densify_max_scale', 0.05),
+            use_soft_dynamic=getattr(cfg.dynamic, 'enabled', False) and getattr(cfg.dynamic, 'use_soft_weights', True),
         )
 
         # Keyframe management
@@ -94,7 +98,9 @@ class SLAMPipeline:
         # State
         self.estimated_poses: list[torch.Tensor] = []
         self.frame_count = 0
+        self._keyframe_count = 0  # monotonic keyframe counter (for language cadence)
         self._recent_losses = deque(maxlen=20)  # for outlier rejection
+        self._prev_depth: torch.Tensor | None = None
 
         # Language pipeline (lazy init — loaded on first use)
         self.lang_enabled = getattr(cfg.language, 'enabled', False)
@@ -108,6 +114,72 @@ class SLAMPipeline:
         self._lang_initialized = False
         # Cache: keyframe_id -> compressed feature map (H, W, latent_dim)
         self._lang_cache: dict[int, torch.Tensor] = {}
+
+        # Dynamic object masking (lazy init)
+        self.dynamic_enabled = getattr(cfg.dynamic, 'enabled', False)
+        self._dynamic_detector = None
+        self._temporal_filter = None
+        self._dynamic_initialized = False
+        self._dynamic_keyframe_count = 0
+
+    def _should_add_keyframe(self, pose: torch.Tensor, frame_id: int) -> bool:
+        """Motion-based keyframe selection.
+
+        Adds a keyframe if EITHER:
+          * translation since last keyframe >= kf_trans_thresh (meters)
+          * rotation    since last keyframe >= kf_rot_thresh   (radians)
+          * it has been >= kf_max_interval frames since last keyframe
+
+        Falls back to every-N-frames if no keyframes exist yet.
+        """
+        if len(self.keyframes) == 0:
+            return True
+
+        kf_trans = getattr(self.cfg.slam.keyframe, "kf_trans_thresh", 0.05)   # 5cm
+        kf_rot = getattr(self.cfg.slam.keyframe, "kf_rot_thresh", 0.087)      # ~5 deg
+        kf_max = getattr(self.cfg.slam.keyframe, "kf_max_interval",
+                         self.keyframe_every_n * 3)
+        kf_min = getattr(self.cfg.slam.keyframe, "kf_min_interval", 2)
+
+        last_kf = self.keyframes[-1]
+        frames_since = frame_id - last_kf["frame_id"]
+        if frames_since < kf_min:
+            return False
+        if frames_since >= kf_max:
+            return True
+
+        last_pose = last_kf["pose"]
+        # Translation delta
+        t_delta = (pose[:3, 3] - last_pose[:3, 3]).norm().item()
+        # Rotation delta via trace of relative rotation
+        R_rel = pose[:3, :3] @ last_pose[:3, :3].T
+        cos_angle = ((R_rel.trace() - 1.0) * 0.5).clamp(-1.0, 1.0)
+        r_delta = torch.acos(cos_angle).item()
+
+        return t_delta >= kf_trans or r_delta >= kf_rot
+
+    def _init_dynamic_pipeline(self) -> None:
+        """Lazy-initialize the dynamic detection pipeline."""
+        if self._dynamic_initialized:
+            return
+
+        print("Initializing dynamic object detector...", flush=True)
+        from ..dynamic import DynamicDetector, TemporalFilter
+
+        cfg = self.cfg.dynamic
+        self._dynamic_detector = DynamicDetector(
+            model_name=cfg.yolo_model,
+            confidence_thresh=cfg.confidence_thresh,
+            dynamic_classes=list(cfg.dynamic_classes),
+            device=self.device,
+        )
+        self._temporal_filter = TemporalFilter(
+            window_size=cfg.temporal_window,
+            min_detections=cfg.min_detections,
+            dilation_kernel=cfg.mask_dilation_kernel,
+        )
+        self._dynamic_initialized = True
+        print("  Dynamic detector ready.", flush=True)
 
     def process_first_frame(
         self,
@@ -147,6 +219,7 @@ class SLAMPipeline:
         })
         self.estimated_poses.append(pose)
         self.frame_count = 1
+        self._prev_depth = depth.squeeze(0).clone()
 
         return pose
 
@@ -309,6 +382,40 @@ class SLAMPipeline:
 
         info = {"frame_id": frame_id}
 
+        # --- DYNAMIC MASKING ---
+        dynamic_mask = None  # None = no masking (all pixels used)
+        if self.dynamic_enabled:
+            self._init_dynamic_pipeline()
+            # Raw YOLO output: bool (H, W), True = detected dynamic class
+            raw_dynamic = self._dynamic_detector.detect_and_merge(rgb)
+            raw_dynamic = raw_dynamic.to(self.device)
+
+            # FIX 6: Depth-verify BEFORE temporal filter.
+            # Removes stationary YOLO detections (e.g. sitting person, furniture
+            # mislabeled) by requiring the flagged pixel to have actually moved
+            # in depth compared to the previous frame.
+            depth_verify_thresh = getattr(self.cfg.dynamic, 'depth_verify_thresh', 0.05)
+            if self._prev_depth is not None and raw_dynamic.any():
+                cur_depth_hw = depth.squeeze(0)      # (H, W)
+                prev_depth_hw = self._prev_depth      # (H, W)
+                depth_diff = (cur_depth_hw - prev_depth_hw).abs()
+                mean_depth = cur_depth_hw.clamp(min=0.1)
+                relative_diff = depth_diff / mean_depth
+                # Pixels flagged dynamic but with no depth change -> un-flag them
+                not_moving = relative_diff < depth_verify_thresh
+                raw_dynamic = raw_dynamic & ~not_moving
+
+            # Temporal filter expects CPU bool and returns (H, W) float (1=static, 0=dynamic)
+            dynamic_mask = self._temporal_filter.update(raw_dynamic.cpu())
+            dynamic_mask = dynamic_mask.to(self.device)
+
+            self._prev_depth = depth.squeeze(0).clone()
+
+            n_dynamic = (dynamic_mask < 0.5).sum().item()
+            if n_dynamic > 0:
+                info["dynamic_pixels"] = n_dynamic
+                info["dynamic_pct"] = n_dynamic / (self.height * self.width) * 100
+
         # --- TRACKING ---
         t0 = time.time()
         if use_gt_pose:
@@ -336,6 +443,7 @@ class SLAMPipeline:
                 width=self.width,
                 height=self.height,
                 init_pose=init_pose,
+                mask=dynamic_mask,
             )
             info["tracking_loss"] = track_info["final_loss"]
 
@@ -374,16 +482,37 @@ class SLAMPipeline:
         self.estimated_poses.append(est_pose)
         self.frame_count += 1
 
+        # FIX 5: Update Bayesian dynamic belief for all Gaussians
+        if self.dynamic_enabled and dynamic_mask is not None:
+            use_bayesian = getattr(self.cfg.dynamic, 'use_bayesian_belief', True)
+            if use_bayesian:
+                viewmat = fast_se3_inverse(est_pose)
+                gaussian_map.update_dynamic_belief(
+                    viewmat, self.K, self.width, self.height, dynamic_mask,
+                    increase=getattr(self.cfg.dynamic, 'belief_increase', 0.3),
+                    decay=getattr(self.cfg.dynamic, 'belief_decay', 0.05),
+                )
+
         # --- KEYFRAME CHECK ---
-        is_keyframe = (frame_id % self.keyframe_every_n == 0)
+        # Motion-based keyframe selection: add a keyframe when the camera has
+        # moved enough (translation or rotation) since the last keyframe, OR
+        # as a hard timeout to guarantee map growth during slow motion.
+        is_keyframe = self._should_add_keyframe(est_pose, frame_id)
         info["is_keyframe"] = is_keyframe
 
+        # Advance keyframe counter BEFORE the language trigger check so that
+        # extraction cadence (`lang_extract_every_n`) is measured in keyframes,
+        # not in raw frames. Required for motion-based KF selection where
+        # `frame_id` no longer aligns with predictable multiples.
+        if is_keyframe:
+            self._keyframe_count += 1
+
         # --- LANGUAGE FEATURE EXTRACTION ---
-        # Extract language features on keyframes at the configured interval
+        # Extract on every Nth keyframe (keyframe-count based, not frame_id based)
         should_extract_lang = (
             self.lang_enabled
             and is_keyframe
-            and (frame_id % (self.keyframe_every_n * self.lang_extract_every_n) == 0)
+            and (self._keyframe_count % self.lang_extract_every_n == 0)
         )
         if should_extract_lang:
             t_lang = time.time()
@@ -407,6 +536,7 @@ class SLAMPipeline:
                 "frame": {"rgb": rgb, "depth": depth},
                 "pose": est_pose,
                 "frame_id": frame_id,
+                "dynamic_mask": dynamic_mask,
             })
 
             # Use recent keyframes for mapping
@@ -447,6 +577,11 @@ class SLAMPipeline:
                 else:
                     lang_maps_for_window = None
 
+            # Gather dynamic masks for the keyframe window
+            dynamic_masks_for_window = None
+            if self.dynamic_enabled:
+                dynamic_masks_for_window = [kf.get("dynamic_mask") for kf in window]
+
             map_info = self.mapper.map(
                 gaussian_map=gaussian_map,
                 frames=map_frames,
@@ -457,6 +592,7 @@ class SLAMPipeline:
                 add_new=True,
                 lang_feature_maps=lang_maps_for_window,
                 lang_weight=effective_lang_weight,
+                masks=dynamic_masks_for_window,
             )
 
             info["mapping_time"] = time.time() - t0
@@ -466,6 +602,17 @@ class SLAMPipeline:
             info["total_gaussians"] = map_info["total_gaussians"]
             if "lang_loss" in map_info:
                 info["lang_loss"] = map_info["lang_loss"]
+
+            # Contamination cleanup: periodically remove Gaussians
+            # corrupted by dynamic objects
+            if self.dynamic_enabled:
+                self._dynamic_keyframe_count += 1
+                cleanup_every = getattr(self.cfg.dynamic, 'cleanup_every_n', 20)
+                if self._dynamic_keyframe_count % cleanup_every == 0:
+                    thresh = getattr(self.cfg.dynamic, 'contamination_thresh', 3)
+                    n_cleaned = gaussian_map.cleanup_contaminated(thresh)
+                    if n_cleaned > 0:
+                        info["contamination_cleaned"] = n_cleaned
         else:
             info["mapping_time"] = 0.0
             info["total_gaussians"] = gaussian_map.num_gaussians

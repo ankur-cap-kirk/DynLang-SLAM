@@ -28,6 +28,9 @@ class Tracker:
         coarse_to_fine: bool = True,
         coarse_downscale: int = 4,
         coarse_ratio: float = 0.6,
+        use_soft_dynamic: bool = False,
+        early_stop_patience: int = 8,
+        early_stop_rel_thresh: float = 0.001,
     ):
         self.renderer = renderer
         self.num_iterations = num_iterations
@@ -40,11 +43,14 @@ class Tracker:
         self.device = device
         self.render_downscale = render_downscale
         self.lr_end_factor = lr_end_factor  # LR decays to lr_pose * lr_end_factor
-        # Coarse-to-fine: first coarse_ratio of iterations at coarse_downscale,
-        # then remaining at render_downscale (GS-SLAM inspired)
         self.coarse_to_fine = coarse_to_fine
         self.coarse_downscale = coarse_downscale
         self.coarse_ratio = coarse_ratio
+        self.use_soft_dynamic = use_soft_dynamic
+        # Adaptive early stopping: halt iterations once loss plateaus.
+        # Saves compute on easy frames and allocates iterations where needed.
+        self.early_stop_patience = early_stop_patience
+        self.early_stop_rel_thresh = early_stop_rel_thresh
 
     def track(
         self,
@@ -117,6 +123,10 @@ class Tracker:
         best_loss = float("inf")
         best_quat = opt_quat.data.clone()
         best_trans = opt_trans.data.clone()
+        # Track loss history for adaptive early stopping
+        loss_history: list[float] = []
+        plateau_count = 0
+        iters_used = 0
 
         # Freeze Gaussian parameters during tracking
         for param in gaussian_map.parameters():
@@ -130,10 +140,21 @@ class Tracker:
         total_iters = self.num_iterations
 
         global_iter = 0
+        early_stopped = False
         for stage_iters, ds in stages:
+            if early_stopped:
+                break
             gt_rgb_hw, gt_depth_hw = gt_cache[ds]
             for _ in range(stage_iters):
                 optimizer.zero_grad()
+
+                # Cosine LR decay: lr -> lr * lr_end_factor over all iterations.
+                # Smoother than linear; gives finer refinement in late iters.
+                progress = global_iter / max(total_iters - 1, 1)
+                lr_mult = self.lr_end_factor + 0.5 * (1.0 - self.lr_end_factor) * \
+                          (1.0 + torch.cos(torch.tensor(progress * 3.14159265)).item())
+                for g in optimizer.param_groups:
+                    g["lr"] = self.lr_pose * lr_mult
 
                 # Interpolate loss weights: t goes from 0.0 (start) to 1.0 (end)
                 t = global_iter / max(total_iters - 1, 1)
@@ -159,9 +180,18 @@ class Tracker:
                     downscale=ds,
                 )
 
+                # Downscale mask to match render resolution if needed
+                mask_ds = mask
+                if mask is not None and ds > 1:
+                    mask_ds = torch.nn.functional.interpolate(
+                        mask.unsqueeze(0).unsqueeze(0),
+                        scale_factor=1.0/ds, mode='nearest',
+                    ).squeeze(0).squeeze(0)
+
                 # Compute loss with dynamic weights
                 loss, loss_dict = compute_losses(
-                    rendered, gt_rgb_hw, gt_depth_hw, iter_weights, mask
+                    rendered, gt_rgb_hw, gt_depth_hw, iter_weights, mask_ds,
+                    use_soft_dynamic=self.use_soft_dynamic,
                 )
 
                 loss.backward()
@@ -175,8 +205,27 @@ class Tracker:
                     best_loss = loss_dict["total"]
                     best_quat = opt_quat.data.clone()
                     best_trans = opt_trans.data.clone()
+                    plateau_count = 0
+                else:
+                    plateau_count += 1
 
+                # Adaptive early stopping: stop when loss plateaus for
+                # `early_stop_patience` consecutive iterations OR when
+                # relative improvement over the last 5 iters falls below threshold.
+                loss_history.append(loss_dict["total"])
                 global_iter += 1
+                iters_used = global_iter
+
+                if len(loss_history) >= 6:
+                    rel_improve = (loss_history[-6] - loss_history[-1]) / \
+                                  (abs(loss_history[-6]) + 1e-8)
+                    # Don't stop before at least 10 iters have run
+                    if global_iter >= 10 and (
+                        plateau_count >= self.early_stop_patience
+                        or rel_improve < self.early_stop_rel_thresh
+                    ):
+                        early_stopped = True
+                        break
 
         # Re-enable gradients for Gaussians
         for param in gaussian_map.parameters():
@@ -187,7 +236,8 @@ class Tracker:
 
         info = {
             "final_loss": best_loss,
-            "iterations": self.num_iterations,
+            "iterations": iters_used,
+            "early_stopped": early_stopped,
         }
         return final_pose, info
 

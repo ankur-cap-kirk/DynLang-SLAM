@@ -8,17 +8,18 @@ import sys
 import os
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, PROJECT_ROOT)
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 import numpy as np
 from PIL import Image
 
 # ---- Config ----
-FRAME_PATH = "data/Replica/room0/results/frame000100.jpg"
-SAM_CHECKPOINT = "checkpoints/sam2.1_hiera_tiny.pt"
+FRAME_PATH = os.path.join(PROJECT_ROOT, "data", "Replica", "room0", "results", "frame000100.jpg")
+SAM_CHECKPOINT = os.path.join(PROJECT_ROOT, "checkpoints", "sam2.1_hiera_tiny.pt")
 SAM_MODEL = "sam2.1_hiera_t"
-OUTPUT_DIR = "results/language_test"
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "results", "language_test")
 TEXT_QUERIES = ["chair", "table", "floor", "wall", "plant", "sofa"]
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)

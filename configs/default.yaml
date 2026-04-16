@@ -39,15 +39,20 @@ slam:
 
   # Tracking
   tracking:
-    iterations: 50  # optimization steps per frame
+    iterations: 50  # maximum optimization steps per frame
     lr_pose: 0.002  # learning rate for camera pose (tuned for full-res gsplat)
-    lr_end_factor: 0.3  # LR decays to lr_pose * 0.3 by last iteration (gentle decay)
+    lr_end_factor: 0.05  # cosine LR decay end factor (tighter refinement)
     use_depth: true
     depth_weight: 1.0
     # Coarse-to-fine tracking (GS-SLAM inspired)
     coarse_to_fine: false  # disabled — regression observed with both 4x and 2x
     coarse_downscale: 2   # downscale factor for coarse stage (2x = half res)
     coarse_ratio: 0.4     # fraction of iterations spent on coarse stage
+    # Constant-velocity pose initialization
+    use_velocity_init: true
+    # Adaptive early stopping (Phase 3)
+    early_stop_patience: 8       # stop if loss hasn't improved for N iterations
+    early_stop_rel_thresh: 0.001 # or relative improvement < 0.1% over last 5 iters
 
   # Mapping
   mapping:
@@ -63,9 +68,15 @@ slam:
 
   # Keyframe selection
   keyframe:
-    every_n_frames: 5
+    every_n_frames: 5       # legacy fallback (unused when motion-based)
     max_keyframes: 200
-    overlap_thresh: 0.95  # skip if >95% overlap with existing keyframes
+    overlap_thresh: 0.95    # skip if >95% overlap with existing keyframes
+    # Motion-based keyframe selection (Phase 3): add KF when EITHER
+    # translation/rotation threshold reached OR max interval elapsed.
+    kf_trans_thresh: 0.05   # meters of translation since last KF
+    kf_rot_thresh:   0.087  # radians (~5 deg) of rotation since last KF
+    kf_min_interval: 2      # minimum frames between KFs (avoid spam)
+    kf_max_interval: 15     # force KF at least this often (map coverage)
 
 # Loss weights
 loss:
@@ -105,6 +116,13 @@ dynamic:
   min_detections: 2  # min detections in window to confirm dynamic
   # Mask processing
   mask_dilation_kernel: 5  # dilation kernel size in pixels
+  depth_verify_thresh: 0.05  # relative depth change threshold to confirm motion
+  # Soft per-pixel weighting (DGS-SLAM)
+  use_soft_weights: true
+  # Bayesian per-Gaussian belief (BDGS-SLAM)
+  use_bayesian_belief: true
+  belief_increase: 0.2  # belief bump when Gaussian projects into dynamic region
+  belief_decay: 0.07  # per-frame decay toward 0 (faster recovery)
   # Contamination cleanup
   cleanup_every_n: 20  # frames between cleanup passes
   contamination_thresh: 3  # min frames a gaussian must be contaminated

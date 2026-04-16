@@ -1,0 +1,23 @@
+project: DynLang-SLAM Language Pipeline
+question: How to efficiently integrate language features (CLIP + SAM) into a 3DGS SLAM pipeline for open-vocabulary 3D querying?
+status: bootstrap
+phase: literature_survey
+
+target_system:
+  name: DynLang-SLAM
+  gaussian_lang_dim: 16
+  clip_model: ViT-L/14
+  clip_dim: 768
+  sam_model: vit_l
+  existing: per-Gaussian lang_feats field (16-dim, all zeros)
+
+key_questions:
+  - How do LangSplat/LEGaussians extract and fuse CLIP features into Gaussians?
+  - What autoencoder architecture compresses 768-dim CLIP to 16-dim effectively?
+  - How to handle multi-scale SAM masks for region-level features?
+  - How to query 3D Gaussians with text at inference time?
+  - How to train the autoencoder online during SLAM?
+
+hypotheses: []
+experiments_completed: 0
+current_findings: null

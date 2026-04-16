@@ -1,0 +1,230 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{enumitem}
+
+\definecolor{ours}{rgb}{0.0, 0.4, 0.7}
+\definecolor{novelty}{rgb}{0.6, 0.0, 0.6}
+
+\title{DynLang-SLAM: How Our Pipeline Differs from\\Existing 3DGS SLAM Methods}
+\author{Ankur Guruprasad\\
+EEE 515 -- Computer Vision, Arizona State University\\
+\texttt{agurupr6@asu.edu}}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+DynLang-SLAM is a 3D Gaussian Splatting (3DGS) SLAM system that combines real-time camera tracking with open-vocabulary language understanding and dynamic object handling. This report compares our architectural choices against existing 3DGS SLAM papers --- SplaTAM \cite{splatam}, MonoGS \cite{monogs}, Gaussian-SLAM \cite{gaussianslam}, GS-SLAM \cite{gsslam}, and RTG-SLAM \cite{rtgslam} --- highlighting where we follow established patterns, where we innovate, and why.
+
+\section{System Architecture Comparison}
+
+\subsection{Overall Pipeline}
+
+All 3DGS SLAM systems share the same high-level loop: \textit{Track} (optimize camera pose) $\rightarrow$ \textit{Keyframe check} $\rightarrow$ \textit{Map} (optimize Gaussians). The key differences lie in the details of each step.
+
+\begin{table*}[t]
+\centering
+\caption{Architectural comparison of 3DGS SLAM methods. \textcolor{ours}{Blue} = DynLang-SLAM specifics.}
+\label{tab:comparison}
+\small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\textbf{Feature} & \textbf{SplaTAM} & \textbf{MonoGS} & \textbf{GS-SLAM} & \textbf{G-SLAM} & \textbf{RTG-SLAM} & \textbf{\textcolor{ours}{Ours}} \\
+\midrule
+Renderer & diff-gaussian & custom & diff-gaussian & gsplat & custom & \textcolor{ours}{gsplat} \\
+Tracking method & Loss opt. & Direct opt. & Loss opt. & Loss opt. & ICP & \textcolor{ours}{Loss opt.} \\
+Depth loss & L1 & L1 & L1 & L1 & N/A (ICP) & \textcolor{ours}{L1} \\
+RGB loss & L1 & L1 & L1 + SSIM & L1 & L1 & \textcolor{ours}{L1 + SSIM} \\
+Depth weight & 1.0 & --- & 0.8 & 1.0 & --- & \textcolor{ours}{1.2} \\
+RGB weight & 0.5 & --- & 0.8 & 1.0 & --- & \textcolor{ours}{0.5} \\
+Loss scheduling & None & None & None & None & None & \textcolor{ours}{Rising RGB} \\
+Tracking iters & 40 & --- & --- & --- & --- & \textcolor{ours}{50} \\
+LR scheduling & None & --- & Coarse LR & None & --- & \textcolor{ours}{Cosine (map)} \\
+Pose init & Previous & Previous & Previous & Previous & ICP & \textcolor{ours}{Const. velocity} \\
+Densification & SfM-style & --- & Coarse-fine & None & Tile-based & \textcolor{ours}{Grad + render} \\
+Dynamic objects & No & No & No & No & No & \textcolor{ours}{Planned (YOLO)} \\
+Language & No & No & No & No & No & \textcolor{ours}{Planned (CLIP)} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Tracking Innovations}
+
+\subsection{Literature-Informed Loss Schedule}
+\label{sec:loss_schedule}
+
+\textbf{What others do:} Every existing 3DGS SLAM system uses \textbf{constant loss weights} during tracking optimization. SplaTAM uses depth$=$1.0, RGB$=$0.5 (depth is 2$\times$ RGB). Gaussian-SLAM uses equal weights. No paper modulates loss weights across iterations.
+
+\textbf{What we do:} DynLang-SLAM uses a \textcolor{ours}{\textbf{rising photometric schedule}} --- the first literature-aware dynamic loss weighting in 3DGS SLAM:
+\begin{align}
+w_{\text{depth}}(t) &= 1.0 \cdot w_d \quad \text{(constant)} \\
+w_{\text{rgb}}(t) &= (0.5 + 0.5t) \cdot w_r \quad t \in [0, 1] \\
+w_{\text{ssim}}(t) &= (0.5 + 0.5t) \cdot w_s
+\end{align}
+where $w_d = 1.2$, $w_r = 0.5$, $w_s = 0.2$ are the base weights, and $t$ is the normalized iteration progress.
+
+\textbf{Why:} Early iterations need a strong geometric anchor (depth) to pull the pose into the correct basin of attraction. Late iterations benefit from photometric detail (RGB, SSIM) for sub-pixel refinement. Critically, depth is \textit{never reduced} below baseline --- our literature survey found that reducing depth weight causes long-term drift (validated by our own room0 regression experiment).
+
+\subsection{Constant-Velocity Pose Initialization}
+
+\textbf{What others do:} Most methods initialize the current pose estimate as the previous frame's pose (identity motion model). RTG-SLAM uses ICP which implicitly provides better initialization.
+
+\textbf{What we do:} We extrapolate using the two most recent poses:
+\begin{equation}
+\hat{T}_t = T_{t-1} \cdot (T_{t-2}^{-1} \cdot T_{t-1})
+\end{equation}
+This constant-velocity model provides better initialization for scenes with consistent camera motion (e.g., room1 with its sweeping trajectory).
+
+\textbf{Why:} With only 50 tracking iterations, the optimizer has limited budget. Starting closer to the true pose means convergence is faster and more reliable, especially for scenes with non-trivial camera motion.
+
+\subsection{Quaternion Normalization per Step}
+
+\textbf{What others do:} Most methods optimize quaternions freely and normalize only at the final output.
+
+\textbf{What we do:} After every optimizer step, we normalize the quaternion to unit length:
+\begin{equation}
+\mathbf{q} \leftarrow \frac{\mathbf{q}}{\|\mathbf{q}\|}
+\end{equation}
+
+\textbf{Why:} Adam's adaptive learning rate scales each quaternion component independently. Without normalization, the magnitude drifts, causing the effective rotation step size to vary unpredictably. Per-step normalization keeps the optimization on the unit quaternion manifold.
+
+\subsection{Motion Magnitude Clamping}
+
+\textbf{What others do:} No explicit motion clamping in any published method.
+
+\textbf{What we do:} If the estimated translation exceeds 5$\times$ the average recent motion (or 5cm minimum), we clamp it to that bound while preserving direction.
+
+\textbf{Why:} Single-frame drift from tracking failure can compound catastrophically. This is a safety net, not a correction --- it fires rarely but prevents catastrophic jumps.
+
+\section{Mapping Innovations}
+
+\subsection{Gradient + Rendering-Guided Densification}
+
+\textbf{What others do:} SplaTAM uses silhouette-based expansion only. Original 3DGS uses position gradient thresholding. RTG-SLAM uses tile-based heuristics.
+
+\textbf{What we do:} We combine both approaches:
+\begin{enumerate}[itemsep=2pt]
+\item \textbf{Gradient-based}: Split large / clone small Gaussians where position gradient $\|\nabla \mu\| > \tau$
+\item \textbf{Rendering-guided}: When color error is high ($>0.3$) or coverage is low ($\alpha < 0.5$), we halve the gradient threshold $\tau$ to densify more aggressively in under-reconstructed regions
+\item \textbf{Silhouette expansion}: Standard SplaTAM-style addition of new Gaussians where $\alpha < 0.5$
+\end{enumerate}
+
+\textbf{Why:} Silhouette expansion alone misses regions where Gaussians exist but are too large/blurry (they contribute to alpha but not to accurate rendering). Gradient-based densification catches these cases. The rendering-guided threshold adaptation is novel --- it bridges the gap between the two signals.
+
+\subsection{Isotropic Regularization}
+
+\textbf{What others do:} MonoGS proposes isotropic regularization. Most other methods do not use it.
+
+\textbf{What we do:} We penalize elongated Gaussians:
+\begin{equation}
+\mathcal{L}_{\text{iso}} = \frac{1}{N} \sum_{i=1}^{N} \sum_{j=1}^{3} |s_{ij} - \bar{s}_i|
+\end{equation}
+where $s_{ij}$ are the activated scale components and $\bar{s}_i$ is their mean.
+
+\textbf{Why:} In SLAM, elongated Gaussians create ambiguous depth and can ``slide'' during tracking. Isotropic Gaussians provide more reliable geometric primitives.
+
+\subsection{Cosine Annealing LR in Mapping}
+
+\textbf{What others do:} Constant LR (SplaTAM, Gaussian-SLAM), or coarse-to-fine LR (GS-SLAM uses higher LR for first 5 iterations).
+
+\textbf{What we do:} CosineAnnealingLR from full LR to $0.3\times$ LR over 60 mapping iterations. \textit{Note:} We do NOT use LR scheduling in the tracker (50 iterations is too short; LR decay traps the pose in local minima).
+
+\textbf{Why:} Mapping iterations (60) are longer and benefit from aggressive early optimization followed by fine-grained convergence. Tracking (50 iterations) needs consistent step sizes to escape local minima.
+
+\subsection{Fast SE(3) Inverse}
+
+\textbf{What others do:} Standard \texttt{torch.inverse()} for pose inversion.
+
+\textbf{What we do:} Exploit the rigid-body structure of SE(3):
+\begin{equation}
+T^{-1} = \begin{bmatrix} R^T & -R^T \mathbf{t} \\ \mathbf{0} & 1 \end{bmatrix}
+\end{equation}
+
+\textbf{Why:} Avoids the $O(n^3)$ general matrix inversion. Mathematically identical for valid SE(3) matrices, faster in practice.
+
+\section{Planned: Language Pipeline}
+\label{sec:language}
+
+The key differentiator of DynLang-SLAM is the integration of open-vocabulary language features into the Gaussian map, enabling 3D text-based object queries. No existing 3DGS SLAM system has this capability.
+
+\textbf{Architecture} (LangSplat-inspired):
+\begin{enumerate}[itemsep=2pt]
+\item SAM mask generation at 3 semantic scales (subpart, part, whole)
+\item Per-mask CLIP encoding (ViT-L/14, 768-dim)
+\item Online autoencoder compression (768 $\rightarrow$ 16-dim latent)
+\item Fusion into Gaussian \texttt{lang\_feats} via differentiable splatting
+\item Open-vocabulary 3D query via cosine similarity
+\end{enumerate}
+
+\textbf{Key challenge:} LangSplat trains its autoencoder offline on all images. In SLAM, we must train it \textit{online} as frames arrive --- requiring a warmup phase and careful generalization.
+
+\section{Planned: Dynamic Object Masking}
+
+Another unique capability: dynamic object detection and exclusion from the static map.
+
+\textbf{Architecture:}
+\begin{enumerate}[itemsep=2pt]
+\item YOLOv8 instance segmentation per frame
+\item Temporal consistency filtering (min 2 detections in 3-frame window)
+\item Dynamic mask applied to both tracking and mapping losses
+\item Contamination cleanup: prune Gaussians that were initialized from dynamic regions
+\end{enumerate}
+
+No existing 3DGS SLAM paper handles dynamic objects at the framework level.
+
+\section{Summary of Novelties}
+
+\begin{table}[h]
+\centering
+\caption{Novel contributions vs. existing methods.}
+\small
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Contribution} & \textbf{Status} \\
+\midrule
+Rising photometric loss schedule & Implemented \\
+Constant-velocity pose init & Implemented \\
+Per-step quaternion normalization & Implemented \\
+Motion magnitude clamping & Implemented \\
+Gradient + rendering densification & Implemented \\
+Isotropic regularization & Implemented \\
+Cosine LR in mapping (not tracking) & Implemented \\
+Fast SE(3) inverse & Implemented \\
+Language-embedded Gaussians (CLIP) & Planned (Week 2) \\
+Dynamic masking (YOLOv8) & Planned (Week 3) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{What We Tried and Rejected}
+
+Importantly, our design is informed by systematic ablation:
+\begin{itemize}[itemsep=2pt]
+\item \textbf{Coarse-to-fine tracking} (GS-SLAM): Regressed room0 from 1.43$\rightarrow$4.07cm. Indoor scenes need full-resolution detail.
+\item \textbf{LR scheduling in tracker}: Regressed room0 to 7.03cm. 50 iterations is too short for LR decay.
+\item \textbf{Huber depth loss}: Hurt convergence. Large depth errors are the signal pulling wrong poses back --- clipping them is counterproductive.
+\item \textbf{Depth-aware scale initialization}: 30\% fewer Gaussians (69K vs 99K). Larger initial scales meant fewer ``unmapped'' pixels, reducing map coverage.
+\item \textbf{Reducing depth weight below baseline}: Caused room0 to regress at 2000 frames (3.5cm vs 2.0cm baseline). Literature confirmed: depth must remain the geometric anchor.
+\end{itemize}
+
+\begin{thebibliography}{10}
+\bibitem{splatam} N. Keetha et al., ``SplaTAM: Splat, Track \& Map 3D Gaussians for Dense RGB-D SLAM,'' CVPR 2024.
+\bibitem{monogs} H. Matsuki et al., ``Gaussian Splatting SLAM,'' CVPR 2024 Highlight.
+\bibitem{gaussianslam} V. Yugay et al., ``Gaussian-SLAM: Photo-realistic Dense SLAM with Gaussian Splatting,'' 2024.
+\bibitem{gsslam} C. Yan et al., ``GS-SLAM: Dense Visual SLAM with 3D Gaussian Splatting,'' CVPR 2024.
+\bibitem{rtgslam} Z. Peng et al., ``RTG-SLAM: Real-time 3D Reconstruction at Scale using Gaussian Splatting,'' SIGGRAPH 2024.
+\bibitem{langsplat} M. Qin et al., ``LangSplat: 3D Language Gaussian Splatting,'' CVPR 2024 Highlight.
+\bibitem{legaussians} J. Shi et al., ``Language Embedded 3D Gaussians for Open-Vocabulary Scene Understanding,'' CVPR 2024.
+\end{thebibliography}
+
+\end{document}
