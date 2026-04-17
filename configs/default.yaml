@@ -49,7 +49,7 @@ slam:
     coarse_downscale: 2   # downscale factor for coarse stage (2x = half res)
     coarse_ratio: 0.4     # fraction of iterations spent on coarse stage
     # Constant-velocity pose initialization
-    use_velocity_init: true
+    use_velocity_init: false  # sweep 4A: identity-relative init for BONN direction changes
     # Adaptive early stopping (Phase 3)
     early_stop_patience: 8       # stop if loss hasn't improved for N iterations
     early_stop_rel_thresh: 0.001 # or relative improvement < 0.1% over last 5 iters
