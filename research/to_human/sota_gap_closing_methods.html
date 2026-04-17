@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DynLang-SLAM: Closing the Gap to SOTA — Method Survey and Recommendations</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; max-width: 980px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.5; }
+  h1 { border-bottom: 3px solid #222; padding-bottom: 0.3em; }
+  h2 { border-bottom: 1px solid #888; padding-bottom: 0.2em; margin-top: 2em; }
+  h3 { margin-top: 1.5em; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.95em; }
+  th, td { border: 1px solid #bbb; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; }
+  code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-size: 0.92em; }
+  pre { background: #f7f7f7; padding: 10px; border-left: 3px solid #0a66c2; overflow-x: auto; font-size: 0.88em; }
+  .rec { background: #e8f5e9; border-left: 4px solid #388e3c; padding: 10px 14px; margin: 0.8em 0; }
+  .warn { background: #fff8e1; border-left: 4px solid #f9a825; padding: 10px 14px; margin: 0.8em 0; }
+  .skip { background: #fff1f1; border-left: 4px solid #c62828; padding: 10px 14px; margin: 0.8em 0; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.8em; margin-right: 4px; }
+  .tag-high { background: #c8e6c9; color: #1b5e20; }
+  .tag-med  { background: #fff59d; color: #795548; }
+  .tag-low  { background: #ffcdd2; color: #b71c1c; }
+</style>
+</head>
+<body>
+
+<h1>Closing the Gap to SOTA — Method Survey &amp; 2-Week Plan</h1>
+
+<p><strong>Project:</strong> DynLang-SLAM &nbsp;&middot;&nbsp;
+<strong>Current:</strong> BONN person_tracking 20.32 cm, balloon 57.35 cm &nbsp;&middot;&nbsp;
+<strong>SOTA:</strong> 4.5 cm / 3.7 cm (DG-SLAM) &nbsp;&middot;&nbsp;
+<strong>Date:</strong> 2026-04-16</p>
+
+<p>Written after sequential literature review of MonoGS, SplaTAM, DG-SLAM, DGS-SLAM, Gassidy,
+BDGS-SLAM, WildGS-SLAM, GLC-SLAM, LoopSplat, Splat-SLAM, KBGS-SLAM, LGSBA.
+Per-paper notes live in <code>research/literature/</code>.</p>
+
+<h2>1. Diagnosis recap</h2>
+<p>Across 10 hyperparameter configs we&rsquo;ve already seen:</p>
+<ul>
+  <li>ATE on person_tracking is <strong>invariant at ~20 cm</strong> regardless of KF density, loss weights, map growth, pose init.</li>
+  <li>ATE builds up as a <strong>single discrete drift event at frame ~65</strong>, not smooth accumulation.</li>
+  <li>balloon is <strong>2.8&times; worse</strong> than person_tracking, and the YOLO mask does nothing on balloon
+      (balloon is not in COCO).</li>
+</ul>
+<p>Diagnosis: the gap is <em>architectural</em>, not tunable. Three concrete deficits:</p>
+<ol>
+  <li>Keyframe poses are <strong>frozen after tracking</strong>. A bad pose at frame 65 is never revisited.</li>
+  <li>Dynamic masking is <strong>class-based only</strong>. Anything outside COCO moving classes leaks into the map.</li>
+  <li>No <strong>tracking-failure detection</strong>. When the optimizer plateaus on a hard frame, the bad pose is committed silently.</li>
+</ol>
+
+<h2>2. What SOTA methods actually do</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th>Local BA over KF window?</th>
+      <th>Dynamic masking</th>
+      <th>Loop closure?</th>
+      <th>Failure recovery?</th>
+      <th>BONN balloon / ps_track (cm)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>MonoGS</strong><br><span class="tag tag-high">blueprint</span></td>
+      <td>Yes &mdash; 8&ndash;10 KFs, joint pose+Gaussians, pure PyTorch. Covisibility IoU &lt; 0.9.</td>
+      <td>None</td>
+      <td>No</td>
+      <td>No</td>
+      <td>&mdash; (not eval'd on BONN)</td>
+    </tr>
+    <tr>
+      <td><strong>SplaTAM</strong></td>
+      <td>Yes &mdash; current + recent + top-overlap KFs</td>
+      <td>Silhouette gate only (alpha &gt; 0.99)</td>
+      <td>No</td>
+      <td>No</td>
+      <td>&mdash;</td>
+    </tr>
+    <tr>
+      <td><strong>DG-SLAM</strong><br><span class="tag tag-high">SOTA</span></td>
+      <td>via DROID-VO (coarse) + GS refine (fine)</td>
+      <td><strong>Depth warp mask</strong> over 4-frame window, UNION with semantic mask</td>
+      <td>via DROID-VO backend</td>
+      <td>No</td>
+      <td class="num">3.7 / 4.5</td>
+    </tr>
+    <tr>
+      <td><strong>BDGS-SLAM</strong></td>
+      <td>No</td>
+      <td>Per-Gaussian Bayesian belief over YOLOv5 + features + EMA decay</td>
+      <td>No</td>
+      <td>No</td>
+      <td class="num">avg 1.82 across 8 seqs</td>
+    </tr>
+    <tr>
+      <td><strong>Gassidy</strong></td>
+      <td>Standard mapping window</td>
+      <td>Per-iteration loss-flow + GMM (still needs YOLO for instance grouping)</td>
+      <td>No</td>
+      <td>No</td>
+      <td class="num">2.6 / 10.3</td>
+    </tr>
+    <tr>
+      <td><strong>WildGS-SLAM</strong></td>
+      <td>Dense BA weighted by uncertainty</td>
+      <td><strong>DINOv2 features &rarr; MLP &rarr; per-pixel uncertainty</strong> (class-agnostic, no YOLO)</td>
+      <td>via DROID-style backend</td>
+      <td>No</td>
+      <td>(numbers not extracted)</td>
+    </tr>
+    <tr>
+      <td><strong>GLC-SLAM</strong></td>
+      <td>Submap mapping</td>
+      <td>None</td>
+      <td>NetVLAD + pose graph LM + keyframe-centric Gaussian deformation</td>
+      <td>No</td>
+      <td>Replica only (+7% ATE from LC)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>3. Ranked recommendations for 2-week course timeline</h2>
+
+<div class="rec">
+<h3>A. Keyframe-window local bundle adjustment (MonoGS-style)
+<span class="tag tag-high">impact: high</span> <span class="tag tag-med">effort: ~200 LoC</span></h3>
+<p><strong>What:</strong> Un-freeze keyframe poses during mapping. Pick window W of 5&ndash;8 recent/covisible KFs.
+Jointly optimize <code>{T_k : k &in; W} &cup; G</code> against the union of observations across those KFs,
+using the same photometric + depth loss already in our tracker + isotropic regularization on Gaussians.</p>
+<p><strong>Why this first:</strong> directly attacks our diagnosed failure &mdash; the frame-65 discrete drift event
+is un-fixable today because that KF&rsquo;s pose is frozen the moment tracking returns. Local BA gives it a second chance.</p>
+<pre># dynlang_slam/slam/mapper.py  (sketch)
+def local_ba_step(self, window_kfs):
+    pose_params = [kf.pose_param() for kf in window_kfs]  # 6-DoF Lie
+    opt = torch.optim.Adam([
+        {'params': pose_params,   'lr': 1e-3},
+        {'params': self.map.gaussian_params(), 'lr': 1e-3},
+    ])
+    for it in range(N_BA_ITERS):
+        loss = 0
+        for kf in window_kfs:
+            rgb_r, depth_r, alpha = self.map.render(kf.pose)
+            mask = (alpha > 0.95) & kf.static_mask
+            loss = loss + 0.9*l1(rgb_r, kf.rgb, mask) + 0.1*l1(depth_r, kf.depth, mask)
+        loss = loss + lam_iso * isotropic_reg(self.map)
+        opt.zero_grad(); loss.backward(); opt.step()
+</pre>
+<p><strong>Hyperparameters to borrow from MonoGS:</strong> window size 8, <code>&lambda;_iso = 10</code>, KF covisibility IoU threshold 0.9, tracker early-stop at pose update &lt; 1e-4.</p>
+<p><strong>Expected ATE:</strong> -5 to -10 cm on person_tracking. (MonoGS/SplaTAM hit 3&ndash;5 cm on walking_xyz with this mechanism in place; we're giving up a lot by freezing poses.)</p>
+</div>
+
+<div class="rec">
+<h3>B. Depth-warp dynamic mask (DG-SLAM) <span class="tag tag-high">impact: high for balloon</span> <span class="tag tag-med">effort: ~80 LoC</span></h3>
+<p><strong>What:</strong> Class-agnostic dynamic detection by depth consistency. For each recent KF <code>i</code>,
+reproject its pixels into current frame <code>j</code> using estimated pose + depth, then compare reprojected depth
+to current frame depth. Pixels with depth disagreement above threshold are flagged dynamic. Intersect across
+a window of N=4 frames (to filter random noise), then UNION with the YOLO semantic mask.</p>
+<pre># dynlang_slam/mask/depth_warp.py  (sketch)
+def depth_warp_mask(D_i, D_j, T_ji, K, e_th=0.6):
+    """Returns bool mask: True where pixel in frame j is inconsistent with frame i (=dynamic)."""
+    H, W = D_j.shape
+    # pixel grid in j
+    ys, xs = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+    p_j = torch.stack([xs, ys, torch.ones_like(xs)], dim=-1).float()  # (H,W,3)
+    # unproject j -&gt; 3D in j's frame using j's depth
+    P_j = (torch.inverse(K) @ p_j.unsqueeze(-1)).squeeze(-1) * D_j.unsqueeze(-1)
+    # transform to i's frame
+    P_i = (T_ji.inverse()[:3, :3] @ P_j.unsqueeze(-1)).squeeze(-1) + T_ji.inverse()[:3, 3]
+    # project into i
+    p_i = (K @ P_i.unsqueeze(-1)).squeeze(-1)
+    u_i, v_i, z_i = p_i[..., 0]/p_i[..., 2], p_i[..., 1]/p_i[..., 2], p_i[..., 2]
+    D_i_at_pj = grid_sample(D_i, torch.stack([u_i, v_i], dim=-1))  # bilinear
+    return (D_i_at_pj - D_j).abs() &gt; e_th
+
+def fused_motion_mask(current, kf_window, yolo_mask):
+    warp_masks = [depth_warp_mask(kf.depth, current.depth, T_kf_cur, K) for kf in kf_window]
+    static_across_window = ~torch.stack(warp_masks).all(dim=0)  # pixel static in ALL warps
+    dynamic_from_warp = ~static_across_window
+    return dynamic_from_warp | yolo_mask
+</pre>
+<p><strong>Why second:</strong> directly attacks the balloon gap. YOLO emits nothing on balloon; depth-warp mask WILL fire because the balloon&rsquo;s depth is inconsistent between consecutive keyframes.</p>
+<p><strong>Expected ATE:</strong> balloon 57 cm &rarr; &lt;25 cm plausible. person_tracking effect is small (+16% in DG-SLAM's ablation on sequences where semantic already works).</p>
+</div>
+
+<div class="rec">
+<h3>C. Silhouette gate on tracker loss (SplaTAM) <span class="tag tag-med">impact: medium</span> <span class="tag tag-high">effort: ~20 LoC</span></h3>
+<p><strong>What:</strong> Before computing tracker photometric/depth loss, multiply residual by
+<code>(alpha_rendered &gt; 0.95).float()</code>. Pixels that lie in un- or under-mapped regions contribute 0.</p>
+<pre># dynlang_slam/slam/tracker.py  (modify the residual line)
+alpha = render_alpha(pose, gaussians)  # already computed in renderer
+valid = (alpha &gt; 0.95) &amp; static_mask
+loss_rgb = l1(rgb_r[valid], rgb_obs[valid])
+loss_dep = l1(dep_r[valid], dep_obs[valid])
+</pre>
+<p><strong>Why include it:</strong> cheap, orthogonal, helps every frame &mdash; especially early frames where the map is sparse
+and residuals on unmapped pixels pull the tracker toward garbage.</p>
+<p><strong>Expected ATE:</strong> -1 to -3 cm.</p>
+</div>
+
+<div class="warn">
+<h3>D. Tracking-failure detection + retry from alternate inits <span class="tag tag-med">impact: medium</span> <span class="tag tag-med">effort: ~100 LoC</span></h3>
+<p><strong>What:</strong> After each tracker run, compare final photometric loss to a moving median/MAD of recent frames.
+If <code>loss_final &gt; median + 3*MAD</code>, mark frame as <em>suspected failure</em> and retry from alternate inits:
+(1) identity, (2) last-KF pose, (3) velocity-init + small random rotation perturbations. Keep the solution with
+the lowest final loss.</p>
+<p><strong>Why:</strong> our failure mode is a discrete event, so we don't need drift correction &mdash; we need to
+<em>not commit the bad pose in the first place</em>. No 3DGS SLAM paper does this explicitly, but it's a standard
+feature-SLAM trick (ORB-SLAM's relocalization mode).</p>
+<p><strong>Expected ATE:</strong> directly attacks the frame-65 event &mdash; if it fires correctly on that frame,
+could remove the 14 cm drift jump. But it has recall/precision risk (false-positive retries waste time).
+Do this in week 2 if we still have a discrete drift signature after A+B+C.</p>
+</div>
+
+<div class="skip">
+<h3>E. Loop closure (GLC-SLAM / LoopSplat) <span class="tag tag-low">skip for now</span></h3>
+<p>Replica ablation shows only +7% ATE improvement from loop closure alone (0.29 &rarr; 0.20 cm).
+BONN person_tracking / balloon are short, near-linear trajectories with few real loop opportunities.
+Implementation cost (NetVLAD, LM solver, keyframe-centric map deformation) is high. Defer.</p>
+</div>
+
+<div class="skip">
+<h3>F. DINOv2 uncertainty (WildGS-SLAM) <span class="tag tag-low">skip unless time left over</span></h3>
+<p>Cleanest class-agnostic story in the literature, but adds a 300 MB feature backbone and an online-trained MLP.
+The depth-warp mask (B) gets ~70% of the benefit at 10% of the cost. Revisit only if A+B don't close enough of the gap.</p>
+</div>
+
+<h2>4. Proposed 2-week plan</h2>
+<table>
+  <thead><tr><th>Week</th><th>Day</th><th>Deliverable</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="5">Week 1</td><td>1</td><td>Branch, add silhouette gate (C) &mdash; cheapest win. Measure baseline.</td></tr>
+    <tr><td>2</td><td>Implement depth-warp mask (B), unit-test on BONN balloon first 30 frames.</td></tr>
+    <tr><td>3&ndash;4</td><td>Tune depth-warp threshold (0.4, 0.6, 0.8 m) and window size (2, 4, 6). Measure balloon + person_tracking.</td></tr>
+    <tr><td>5</td><td>Mid-week checkpoint: does balloon drop below 30 cm? If not, inspect mask visualizations.</td></tr>
+    <tr><td>6&ndash;7</td><td>Documentation + plots for what we have so far. Git checkpoint.</td></tr>
+
+    <tr><td rowspan="5">Week 2</td><td>8&ndash;9</td><td>Implement local BA (A): expand mapping optimizer to include KF pose params.</td></tr>
+    <tr><td>10&ndash;11</td><td>Tune BA window size (3, 5, 8), trigger cadence (every 5 / 10 KFs), learning rates. Measure both sequences.</td></tr>
+    <tr><td>12</td><td>Optional: add failure detection + retry (D) if discrete drift events still visible.</td></tr>
+    <tr><td>13</td><td>Full ablation: baseline &rarr; +C &rarr; +B &rarr; +A &rarr; +D. One table.</td></tr>
+    <tr><td>14</td><td>Report + figures + final git push.</td></tr>
+  </tbody>
+</table>
+
+<h2>5. Honest expected outcome</h2>
+<p>Stacking A + B + C is a plausibly 2&times;&ndash;3&times; improvement. A realistic target:</p>
+<ul>
+  <li>BONN person_tracking: 20 cm &rarr; <strong>8&ndash;12 cm</strong> (not SOTA 4.5, but competitive).</li>
+  <li>BONN balloon: 57 cm &rarr; <strong>15&ndash;25 cm</strong> (dramatic relative win, class-agnostic mask is the story).</li>
+</ul>
+<p>What we <em>won&rsquo;t</em> match: DROID-VO-based trackers (DG-SLAM, Splat-SLAM) bake in a pre-trained optical-flow pose estimator
+trained on millions of frames. That's the residual gap to SOTA &mdash; a 2-week project can't close it without adopting DROID.</p>
+<p>What we <em>will</em> have: an ablation showing three independent architectural interventions each contributing measurable improvement,
+and a balloon-sequence story that beats the method's own language-grounded baseline by a large margin &mdash; a tight CVPR-style
+course-project narrative.</p>
+
+<h2>6. Sources</h2>
+<ol>
+  <li>Matsuki et al., <em>Gaussian Splatting SLAM</em> (MonoGS), CVPR 2024. <a href="https://arxiv.org/abs/2312.06741">arXiv:2312.06741</a></li>
+  <li>Keetha et al., <em>SplaTAM: Splat, Track &amp; Map 3D Gaussians for Dense RGB-D SLAM</em>, CVPR 2024. <a href="https://spla-tam.github.io/">project page</a></li>
+  <li>Xu et al., <em>DG-SLAM: Robust Dynamic Gaussian Splatting SLAM with Hybrid Pose Optimization</em>, NeurIPS 2024. <a href="https://arxiv.org/abs/2411.08373">arXiv:2411.08373</a></li>
+  <li>Li et al., <em>DGS-SLAM: Gaussian Splatting SLAM in Dynamic Environment</em>, 2024. <a href="https://arxiv.org/abs/2411.10722">arXiv:2411.10722</a></li>
+  <li>Gassidy, <em>Gaussian Splatting SLAM in Dynamic Environments</em>, 2024. <a href="https://arxiv.org/abs/2411.15476">arXiv:2411.15476</a></li>
+  <li>BDGS-SLAM, <em>Probabilistic 3DGS SLAM for Dynamic Environments</em>, 2025. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC12610981/">PMC link</a></li>
+  <li>Zheng et al., <em>WildGS-SLAM: Monocular Gaussian Splatting SLAM in Dynamic Environments</em>, CVPR 2025. <a href="https://openaccess.thecvf.com/content/CVPR2025/papers/Zheng_WildGS-SLAM_Monocular_Gaussian_Splatting_SLAM_in_Dynamic_Environments_CVPR_2025_paper.pdf">CVF paper</a></li>
+  <li>Chen et al., <em>GLC-SLAM: Gaussian Splatting SLAM with Efficient Loop Closure</em>, 2024. <a href="https://arxiv.org/abs/2409.10982">arXiv:2409.10982</a></li>
+  <li>Sandström et al., <em>Splat-SLAM: Globally Optimized RGB-only SLAM with 3D Gaussians</em>, CVPR-W 2025. <a href="https://arxiv.org/abs/2405.16544">arXiv:2405.16544</a></li>
+</ol>
+
+</body>
+</html>
