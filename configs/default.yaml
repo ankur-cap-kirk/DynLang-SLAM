@@ -56,7 +56,7 @@ slam:
 
   # Mapping
   mapping:
-    iterations: 60  # optimization steps per frame
+    iterations: 100  # sweep H: raised from 60 to let new Gaussians converge
     lr_means: 0.0001
     lr_scales: 0.005
     lr_quats: 0.001
