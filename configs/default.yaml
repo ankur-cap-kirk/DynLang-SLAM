@@ -80,8 +80,8 @@ slam:
 
 # Loss weights
 loss:
-  rgb_weight: 0.5
-  depth_weight: 1.2   # baseline (E regression, reverted)
+  rgb_weight: 0.7     # sweep G: raised to emphasize photometric signal
+  depth_weight: 0.8   # sweep G: slight reduction for Kinect noise
   ssim_weight: 0.2
   lang_weight: 0.1
 
