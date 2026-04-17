@@ -26,7 +26,7 @@ gaussians:
   max_gaussians: 1000000
   # Densification
   densify_grad_thresh: 0.0002
-  densify_interval: 10  # mapping calls between densification
+  densify_interval: 5   # sweep J: halved for more frequent split/clone
   densify_max_scale: 0.05  # split threshold in world units
   prune_interval: 100
   opacity_reset_interval: 3000
@@ -64,7 +64,7 @@ slam:
     lr_colors: 0.0025
     lr_lang_feats: 0.001
     lr_end_factor: 0.3  # LR decays to lr * 0.3 by last iteration (gentle decay)
-    new_gaussian_thresh: 0.3  # sweep I: lowered to add Gaussians more aggressively
+    new_gaussian_thresh: 0.5  # baseline (I tied, reverted)
 
   # Keyframe selection
   keyframe:
