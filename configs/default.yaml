@@ -73,10 +73,10 @@ slam:
     overlap_thresh: 0.95    # skip if >95% overlap with existing keyframes
     # Motion-based keyframe selection (Phase 3): add KF when EITHER
     # translation/rotation threshold reached OR max interval elapsed.
-    kf_trans_thresh: 0.05   # meters of translation since last KF (baseline)
-    kf_rot_thresh:   0.087  # radians (~5 deg) of rotation since last KF (baseline)
+    kf_trans_thresh: 0.05   # meters of translation since last KF
+    kf_rot_thresh:   0.087  # radians (~5 deg) of rotation since last KF
     kf_min_interval: 2      # minimum frames between KFs (avoid spam)
-    kf_max_interval: 8      # force KF at least this often (sweep D: cap-only)
+    kf_max_interval: 15     # force KF at least this often (map coverage)
 
 # Loss weights
 loss:
