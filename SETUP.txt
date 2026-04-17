@@ -31,9 +31,12 @@ Step 3: Install gsplat (Gaussian splatting renderer)
     pip install git+https://github.com/nerfstudio-project/gsplat.git --no-deps
 
 
-Step 4: Install SAM2
----------------------
-  pip install sam2
+Step 4: Install SAM2 and YOLOv8
+--------------------------------
+  pip install sam2 ultralytics
+
+  SAM2 provides multi-scale segmentation masks for language features.
+  Ultralytics (YOLOv8) provides dynamic-object instance segmentation.
 
 
 Step 5: Install remaining dependencies
@@ -45,38 +48,87 @@ Step 6: Download model checkpoints
 ------------------------------------
   mkdir checkpoints
 
-  SAM2.1 Hiera-Tiny (149MB):
+  SAM2.1 Hiera-Tiny (149 MB):
     Download from: https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt
     Place at: checkpoints/sam2.1_hiera_tiny.pt
 
-  CLIP ViT-L/14 is downloaded automatically on first run.
+  YOLOv8n-seg (6 MB):
+    Auto-downloaded by ultralytics on first use to the CWD as yolov8n-seg.pt.
+    (You may move it to checkpoints/ if preferred.)
+
+  CLIP ViT-L/14 is downloaded automatically on first run via open_clip.
 
 
-Step 7: Download Replica dataset
----------------------------------
+Step 7: Download datasets
+--------------------------
+
+(a) Replica (static scenes, for baseline SLAM):
+
   mkdir -p data/Replica
   cd data/Replica
   wget https://cvg-data.inf.ethz.ch/nice-slam/data/Replica/room0.zip
   unzip room0.zip
 
-  The structure should be:
+  Structure:
     data/Replica/room0/results/frame000000.jpg
     data/Replica/room0/results/depth000000.png
     data/Replica/room0/traj.txt
+
+(b) BONN RGB-D Dynamic (dynamic scenes, for full pipeline):
+
+  mkdir -p data/BONN
+  cd data/BONN
+  wget https://www.ipb.uni-bonn.de/html/projects/rgbd_dynamic2019/rgbd_bonn_person_tracking.zip
+  unzip rgbd_bonn_person_tracking.zip
+
+  Other sequences: rgbd_bonn_balloon, rgbd_bonn_crowd, rgbd_bonn_moving_nonobstructing_box, etc.
+  Full list: https://www.ipb.uni-bonn.de/data/rgbd-dynamic-dataset/
+
+  Structure (TUM format):
+    data/BONN/rgbd_bonn_person_tracking/rgb/*.png
+    data/BONN/rgbd_bonn_person_tracking/depth/*.png
+    data/BONN/rgbd_bonn_person_tracking/groundtruth.txt
+    data/BONN/rgbd_bonn_person_tracking/rgb.txt
+    data/BONN/rgbd_bonn_person_tracking/depth.txt
+
+  Camera: Kinect v2 (fx=520.9, fy=521.0, cx=325.1, cy=249.7), 640x480, depth scale 5000.
 
 
 Running the tests
 ==================
 
-Language pipeline test (single frame, no SLAM):
-  python scripts/test_language.py
+Replica (static scene) tests:
 
-  Outputs heatmaps to results/language_test/
+  Language pipeline test (single frame, no SLAM):
+    python scripts/test_language.py
 
-Full SLAM + language test (50 frames):
-  python scripts/test_language_slam.py
+  Full SLAM + language test (50 frames, Replica):
+    python scripts/test_language_slam.py
 
-  Runs tracking + mapping + language extraction, then 3D text queries.
+
+BONN (dynamic scene) tests:
+
+  Dynamic-object detector standalone check:
+    python scripts/test_dynamic.py
+
+  BONN SLAM, no dynamics, no language:
+    python scripts/test_bonn_slam.py
+
+  BONN SLAM + dynamic masking (no language):
+    python scripts/test_bonn_dynamic.py
+
+  BONN full pipeline (dynamic + language, 3-mode comparison + text queries):
+    python scripts/test_bonn_full.py
+
+  All logs and metrics go to results/bonn_full_test/.
+
+
+Main entry points:
+
+  python run.py                 # Default config (data/Replica/room0)
+  python run.py --config configs/default.yaml
+  python evaluate.py            # Multi-scene Replica evaluation
+  python visualize.py           # Render frames from saved Gaussian map
 
 
 Configuration
@@ -84,25 +136,46 @@ Configuration
 
 Edit configs/default.yaml to adjust settings:
 
-  - scales: ["whole"]              -> single scale, fits 8GB VRAM
-  - scales: ["whole", "part", "subpart"]  -> multi-scale, needs 16GB+ or cloud GPU
+  Dataset:
+    - dataset.type:  "replica" | "tum"   (tum covers both TUM and BONN)
+    - dataset.path:  path to sequence folder
 
-  - language.enabled: true/false   -> toggle language features
-  - language.extract_every_n: 5    -> frequency of CLIP extraction
-  - slam.tracking.iterations: 50   -> tracking optimization steps
-  - slam.mapping.iterations: 60    -> mapping optimization steps
+  Language:
+    - language.enabled: true/false             - toggle language features
+    - language.extract_every_n: 5              - every Nth keyframe (keyframe-count based)
+    - language.scales: ["whole"]               - single scale, fits 8 GB VRAM
+    - language.scales: ["whole","part","subpart"] - multi-scale, 16 GB+ or cloud
+
+  Dynamic objects (Week 3):
+    - dynamic.enabled: true/false              - toggle YOLOv8 + temporal masking
+    - dynamic.yolo_model: yolov8n-seg          - 6 MB, fast (8 GB GPU)
+    - dynamic.yolo_model: yolov8x-seg          - 136 MB, accurate (16 GB+ GPU)
+    - dynamic.use_bayesian_belief: true        - per-Gaussian dynamic belief tracking
+    - dynamic.cleanup_every_n: 20              - contamination cleanup frequency
+
+  Tracking (Phase 3):
+    - slam.tracking.iterations: 50             - max optimizer steps/frame
+    - slam.tracking.lr_end_factor: 0.05        - cosine LR decay target
+    - slam.tracking.early_stop_patience: 8     - iters with no improvement -> stop
+
+  Keyframe selection (motion-based):
+    - slam.keyframe.kf_trans_thresh: 0.05      - meters since last KF
+    - slam.keyframe.kf_rot_thresh:   0.087     - radians (~5 deg)
+    - slam.keyframe.kf_max_interval: 15        - force KF after N frames
 
 
 GPU Memory Tips
 ================
 
-For GPUs with 8GB VRAM:
-  - Use single scale: scales: ["whole"]
-  - CLIP and SAM2 are automatically offloaded to CPU between extractions
+For GPUs with 8 GB VRAM (RTX 3070/4060 class):
+  - Single scale: language.scales: ["whole"]
+  - Small YOLOv8: dynamic.yolo_model: yolov8n-seg
+  - CLIP, SAM2, and YOLOv8 are offloaded to CPU between frames
   - Feature maps are accumulated on CPU to avoid OOM
 
-For GPUs with 16GB+ VRAM or cloud (Colab A100, etc.):
-  - Use multi-scale: scales: ["whole", "part", "subpart"]
+For GPUs with 16 GB+ VRAM or cloud (Colab A100, etc.):
+  - Multi-scale: language.scales: ["whole", "part", "subpart"]
+  - Larger YOLOv8: dynamic.yolo_model: yolov8x-seg
   - See notebooks/colab_setup.ipynb for Colab setup
 
 
@@ -113,11 +186,14 @@ Project Structure
     core/           - Gaussian map, renderer, losses
     slam/           - Tracker, mapper, SLAM pipeline
     language/       - CLIP extractor, SAM extractor, feature maps, autoencoder
-    dynamic/        - Dynamic object detection (Week 3)
-    data/           - Dataset loaders (Replica)
+    dynamic/        - YOLOv8 detector + temporal filter (Week 3)
+    data/           - Dataset loaders (Replica, TUM/BONN)
     utils/          - Camera utilities, config loader
   configs/          - YAML configuration files
-  scripts/          - Test and evaluation scripts
+  scripts/          - Test, ablation, and diagnostic scripts
+  reports/          - LaTeX/PDF reports
+  research/         - Experiment protocols, findings, literature notes
   notebooks/        - Colab notebook
   checkpoints/      - Model weights (not tracked in git)
   data/             - Datasets (not tracked in git)
+  results/          - Run outputs, logs, renderings (not tracked in git)
