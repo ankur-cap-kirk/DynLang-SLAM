@@ -56,7 +56,7 @@ slam:
 
   # Mapping
   mapping:
-    iterations: 100  # sweep H: raised from 60 to let new Gaussians converge
+    iterations: 60  # baseline (H regression, reverted)
     lr_means: 0.0001
     lr_scales: 0.005
     lr_quats: 0.001
@@ -64,7 +64,7 @@ slam:
     lr_colors: 0.0025
     lr_lang_feats: 0.001
     lr_end_factor: 0.3  # LR decays to lr * 0.3 by last iteration (gentle decay)
-    new_gaussian_thresh: 0.5  # silhouette threshold for adding new gaussians
+    new_gaussian_thresh: 0.3  # sweep I: lowered to add Gaussians more aggressively
 
   # Keyframe selection
   keyframe:
