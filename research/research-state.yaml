@@ -1,23 +1,67 @@
-project: DynLang-SLAM Language Pipeline
-question: How to efficiently integrate language features (CLIP + SAM) into a 3DGS SLAM pipeline for open-vocabulary 3D querying?
-status: bootstrap
-phase: literature_survey
+project: DynLang-SLAM
+question: How can we close the ATE gap to SOTA 3DGS SLAM (20cm -> ~5cm) on dynamic
+  scenes, using principled architectural additions rather than hyperparameter tuning?
+status: active
+phase: literature_survey_for_architectural_gap
 
 target_system:
   name: DynLang-SLAM
+  tracker: frame-to-model photometric + depth, Huber loss, cosine LR decay,
+    early stopping, velocity init
+  mapping: local optimization only (no BA, no pose graph, no loop closure)
+  dynamic: YOLOv8n-seg + COCO classes + temporal filtering + Bayesian belief
+  language: CLIP ViT-L/14 + SAM2.1 Hiera-Tiny + 768->16 autoencoder
   gaussian_lang_dim: 16
-  clip_model: ViT-L/14
-  clip_dim: 768
-  sam_model: vit_l
-  existing: per-Gaussian lang_feats field (16-dim, all zeros)
 
-key_questions:
-  - How do LangSplat/LEGaussians extract and fuse CLIP features into Gaussians?
-  - What autoencoder architecture compresses 768-dim CLIP to 16-dim effectively?
-  - How to handle multi-scale SAM masks for region-level features?
-  - How to query 3D Gaussians with text at inference time?
-  - How to train the autoencoder online during SLAM?
+current_performance:
+  bonn_person_tracking_cm:
+    static: 28.36
+    dynamic: 21.85
+    full: 20.32
+  bonn_balloon_cm:
+    static: 69.33
+    dynamic: 57.24
+    full: 57.35
+  sota_reference:
+    DG-SLAM: 4.73
+    BDGS-SLAM: 4.03
 
-hypotheses: []
-experiments_completed: 0
-current_findings: null
+completed_work:
+  language_pipeline: working (98.6% feat coverage, 11 queries answered correctly)
+  dynamic_pipeline: working on COCO classes, fails on balloon (unknown class)
+  phase3_improvements: 40% ATE reduction from baseline via motion-based KF,
+    adaptive early stopping, cosine LR decay
+  tuning_experiments: 4 (KF-density, loss-weight, map-growth, pose-init) =
+    10 configs, ALL REJECTED
+  cross_sequence_validation: person_tracking was best-case; balloon
+    revealed method-specific limitations
+
+diagnosed_architectural_gaps:
+  - late_drift_event: ATE<15cm through frame 60, discrete ~14cm jump at
+      frame 65-70, invariant across all 10 tuning configs
+  - no_pose_graph_or_BA: local tracker only, no cross-keyframe refinement
+  - no_loop_closure: no drift correction mechanism
+  - class_based_masking_only: fails on objects outside COCO dynamic classes
+  - no_tracking_failure_recovery: when tracker hits hard frame, bad pose
+      is silently committed
+
+focus_areas_under_investigation:
+  1_pose_graph_BA: local bundle adjustment over keyframe window
+  2_motion_based_masking: class-agnostic dynamic detection (depth warp,
+    photometric residual, re-rendering)
+  3_loop_closure_or_recovery: drift correction, especially lightweight
+    recovery-from-failure given discrete-event failure mode
+  4_robust_tracking: M-estimators, multi-hypothesis init, failure detection,
+    adaptive schedules
+
+next_actions:
+  - receive 4 parallel literature research reports (launched)
+  - synthesize into ranked implementation recommendations
+  - pick top 1-2 interventions feasible for 2-week course timeline
+  - lock protocol, git commit, implement, measure
+  - target: 20cm -> 12cm person_tracking and 57cm -> 25cm balloon would
+    already be a strong story (2x improvement on each, clear method gains)
+
+hypotheses_to_be_formed: []
+experiments_completed: 10
+current_findings_summary: architectural_gap_not_hyperparameter_gap
