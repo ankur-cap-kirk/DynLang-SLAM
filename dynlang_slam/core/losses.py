@@ -152,7 +152,7 @@ def compute_losses(
     use_soft_dynamic: bool = False,
     use_huber: bool = True,
     huber_rgb_delta: float = 0.05,
-    huber_depth_delta: float = 0.1,
+    huber_depth_delta: float = 0.2,   # sweep F: widened for BONN Kinect depth noise
 ) -> tuple[torch.Tensor, dict]:
     """Compute combined tracking/mapping loss.
 

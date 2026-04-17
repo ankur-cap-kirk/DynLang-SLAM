@@ -81,7 +81,7 @@ slam:
 # Loss weights
 loss:
   rgb_weight: 0.5
-  depth_weight: 0.6   # sweep E: halved for BONN Kinect depth noise
+  depth_weight: 1.2   # baseline (E regression, reverted)
   ssim_weight: 0.2
   lang_weight: 0.1
 
