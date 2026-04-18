@@ -122,6 +122,24 @@ class SLAMPipeline:
         self._dynamic_initialized = False
         self._dynamic_keyframe_count = 0
 
+        # CoTracker-based (PIPs lineage) class-agnostic dynamic mask.
+        # Lecture 27 (Warping and Tracking) explicitly covers PIPs; CoTracker2
+        # is the direct descendant from the same Meta lab, available via
+        # torch.hub. Mask is UNIONed with YOLO and applied to mapping +
+        # Bayesian-belief update + contamination cleanup (NOT tracking — we
+        # test its effect on the map first).
+        pips_cfg = getattr(cfg.dynamic, 'pips', None)
+        self.pips_enabled = bool(
+            self.dynamic_enabled and pips_cfg
+            and getattr(pips_cfg, 'enabled', False)
+        )
+        self.pips_window = int(getattr(pips_cfg, 'window_size', 8)) if pips_cfg else 8
+        self.pips_grid = int(getattr(pips_cfg, 'grid', 20)) if pips_cfg else 20
+        self.pips_thresh_px = float(getattr(pips_cfg, 'thresh_px', 25.0)) if pips_cfg else 25.0
+        self.pips_dilation = int(getattr(pips_cfg, 'dilation_kernel', 15)) if pips_cfg else 15
+        self._pips_buffer = None
+        self._pips_model = None
+
     def _should_add_keyframe(self, pose: torch.Tensor, frame_id: int) -> bool:
         """Motion-based keyframe selection.
 
@@ -481,6 +499,50 @@ class SLAMPipeline:
 
         self.estimated_poses.append(est_pose)
         self.frame_count += 1
+
+        # --- PIPs / CoTracker class-agnostic mask (post-tracking) ---
+        # Runs AFTER tracking so we have the refined pose for the current
+        # frame. Mask is UNIONed with the YOLO semantic mask and will be used
+        # by mapping, Bayesian belief, and contamination cleanup below.
+        if self.pips_enabled:
+            # Lazy-init buffer and model on first use (avoid hub download cost
+            # until we actually need it).
+            if self._pips_buffer is None:
+                from ..dynamic import PointTrackBuffer
+                self._pips_buffer = PointTrackBuffer(window_size=self.pips_window)
+            if self._pips_model is None:
+                print("Loading CoTracker2 for class-agnostic dynamic mask...", flush=True)
+                self._pips_model = torch.hub.load(
+                    "facebookresearch/co-tracker", "cotracker2",
+                    trust_repo=True,
+                ).to(self.device).eval()
+                print("  CoTracker2 ready.", flush=True)
+
+            # Push refined (rgb, depth, tracked-pose) into the buffer.
+            self._pips_buffer.push(rgb, depth.squeeze(0), est_pose)
+
+            # When the buffer is full, compute the mask and union it in.
+            if self._pips_buffer.is_full():
+                from ..dynamic import compute_pips_dynamic_mask
+                t_pips = time.time()
+                result = compute_pips_dynamic_mask(
+                    buffer=self._pips_buffer,
+                    K=self.K,
+                    model=self._pips_model,
+                    grid=self.pips_grid,
+                    residual_thresh_px=self.pips_thresh_px,
+                    dilation_kernel=self.pips_dilation,
+                    semantic_mask=dynamic_mask,
+                )
+                info["pips_time"] = time.time() - t_pips
+                if result is not None:
+                    new_mask, pips_info = result
+                    dynamic_mask = new_mask
+                    info.update(pips_info)
+                    # Recompute overall dynamic% from the fused mask.
+                    n_dyn = (dynamic_mask < 0.5).sum().item()
+                    info["dynamic_pixels"] = n_dyn
+                    info["dynamic_pct"] = n_dyn / (self.height * self.width) * 100
 
         # FIX 5: Update Bayesian dynamic belief for all Gaussians
         if self.dynamic_enabled and dynamic_mask is not None:
