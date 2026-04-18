@@ -126,6 +126,18 @@ dynamic:
   # Contamination cleanup
   cleanup_every_n: 20  # frames between cleanup passes
   contamination_thresh: 3  # min frames a gaussian must be contaminated
+  # Class-agnostic dynamic mask via CoTracker2 (PIPs lineage, Lec 27).
+  # Tracks a grid of query points through a sliding window and flags any
+  # point whose observed trajectory disagrees with the rigid-motion
+  # prediction (using tracked poses, not velocity-init). Runs AFTER the
+  # tracker, so it affects MAPPING + Bayesian belief + cleanup, NOT the
+  # current frame's pose optimization.
+  pips:
+    enabled: false        # REJECTED (see research/experiments/pips-mask/analysis.md)
+    window_size: 8        # CoTracker2's native window length
+    grid: 20              # 20x20 = 400 query points
+    thresh_px: 25.0       # less-broken variant if re-enabled (thresh=15 breaks H2)
+    dilation_kernel: 15   # dilate sparse grid classification to dense mask
 
 # Training
 training:

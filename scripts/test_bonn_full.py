@@ -31,7 +31,7 @@ from dynlang_slam.core.gaussians import GaussianMap
 from dynlang_slam.slam.pipeline import SLAMPipeline
 
 # ---- Config ----
-SEQUENCE = os.path.join(PROJECT_ROOT, "data", "BONN", "rgbd_bonn_person_tracking")
+SEQUENCE = os.path.join(PROJECT_ROOT, "data", "BONN", "rgbd_bonn_balloon")
 N_FRAMES = 100
 STRIDE = 2
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "results", "bonn_full_test")
