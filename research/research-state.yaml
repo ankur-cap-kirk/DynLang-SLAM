@@ -55,12 +55,16 @@ focus_areas_under_investigation:
     adaptive schedules
 
 next_actions:
-  - intervention A1 (local BA over keyframe window, MonoGS-style): NEXT.
-    Verified: mapper.map() takes poses as list[torch.Tensor], not nn.Parameter,
-    so cross-keyframe pose refinement is the single biggest missing mechanism
-    and addresses the drift-event failure mode that PIPs could not reach.
-  - intervention A2 (tracking-failure retry / multi-hypothesis init): after A1
+  - intervention D1 (opacity reliability mask + loss weight flip, DG-SLAM-style):
+    NEXT. Code inspection showed RGB loss uses soft alpha weighting while depth
+    uses hard threshold (>0.5). DG-SLAM uses hard threshold on both. Cheap
+    targeted change in compute_losses + loss weight flip (rgb 0.5->0.9,
+    depth 1.2->0.1). Addresses sparse-map pose pull-down identified as root
+    cause across C/B/B'/A1.
+  - intervention A2 (tracking-failure retry / multi-hypothesis init): after D1
   - intervention B3 (Tukey M-estimator in tracker): conditional on remaining gap
+  - intervention B2_redux (4-frame-intersection depth warp, DG-SLAM-style):
+    address single-frame-noise failure of B with DG-SLAM's intersection design
   - target: 20cm -> 12cm person_tracking and 57cm -> 25cm balloon would
     already be a strong story (2x improvement on each, clear method gains)
 

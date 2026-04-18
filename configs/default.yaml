@@ -65,6 +65,18 @@ slam:
     lr_lang_feats: 0.001
     lr_end_factor: 0.3  # LR decays to lr * 0.3 by last iteration (gentle decay)
     new_gaussian_thresh: 0.5  # baseline (I tied, reverted)
+    # Local BA (intervention A1, MonoGS-style): co-optimize non-anchor
+    # keyframe poses with Gaussians inside the mapping window. Oldest KF
+    # in window is the gauge anchor (fixed). See
+    # research/experiments/local-ba/protocol.md for pre-registered H1/H2/H3.
+    refine_poses: false  # REJECTED (see research/experiments/local-ba/analysis.md)
+    lr_pose_trans: 1.0e-4   # conservative: tracker already has rough estimate
+    lr_pose_quat: 5.0e-4
+    # Pose prior: MonoGS-style penalty pulling refinement toward tracker's
+    # initial estimate. Reverted to 10.0 (less-broken variant); prior=100 was
+    # strictly worse than prior=10 — evidence that regression is structural,
+    # not magnitude-driven (see analysis.md).
+    pose_prior_weight: 10.0
 
   # Keyframe selection
   keyframe:
