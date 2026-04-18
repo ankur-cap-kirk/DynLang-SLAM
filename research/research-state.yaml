@@ -55,16 +55,13 @@ focus_areas_under_investigation:
     adaptive schedules
 
 next_actions:
-  - intervention D1 (opacity reliability mask + loss weight flip, DG-SLAM-style):
-    NEXT. Code inspection showed RGB loss uses soft alpha weighting while depth
-    uses hard threshold (>0.5). DG-SLAM uses hard threshold on both. Cheap
-    targeted change in compute_losses + loss weight flip (rgb 0.5->0.9,
-    depth 1.2->0.1). Addresses sparse-map pose pull-down identified as root
-    cause across C/B/B'/A1.
-  - intervention A2 (tracking-failure retry / multi-hypothesis init): after D1
+  - intervention A2 (tracking-failure retry / multi-hypothesis init): NEXT.
+    After five rejections of mapping-side / cross-keyframe / loss-formulation
+    interventions, only tracker-side single-frame interventions remain viable.
+    A2 directly addresses the frame-60-70 drift event (poor-man's DROID-VO).
   - intervention B3 (Tukey M-estimator in tracker): conditional on remaining gap
   - intervention B2_redux (4-frame-intersection depth warp, DG-SLAM-style):
-    address single-frame-noise failure of B with DG-SLAM's intersection design
+    lower priority, mapping-side interventions have pattern of failure
   - target: 20cm -> 12cm person_tracking and 57cm -> 25cm balloon would
     already be a strong story (2x improvement on each, clear method gains)
 
@@ -82,6 +79,30 @@ intervention_results:
     person_tracking_full_cm: 25.24  # baseline 20.32, budget <=22.32
     balloon_full_cm: 60.62          # baseline 57.35, budget <=40.00
     regime_mismatch: DG-SLAM uses DROID-VO for upstream pose; we use velocity init
+  D1_opacity_reliability_and_loss_weights:
+    status: REJECTED
+    reason: >
+      Two changes bundled (hard alpha RGB mask + rgb=0.9/depth=0.1 DG-SLAM
+      weights); decomposition shows both harmful individually. Weight flip
+      removes depth convex-basin anchor (tracker.py time-varying schedule
+      is specifically tuned for depth=1.2, comment "never reduce depth
+      anchor"). Hard RGB mask causes 2x densification explosion via indirect
+      gradient-magnitude coupling to densify decisions — Full-mode ATE
+      regresses even though Static improves by 7.87 cm.
+    person_tracking_static_cm_combined: 59.54     # baseline 28.36
+    person_tracking_dynamic_cm_combined: 47.17    # baseline 21.85
+    person_tracking_full_cm_combined: 52.20       # baseline 20.32, budget <=22.32
+    person_tracking_full_cm_opacity_only: 28.99   # FAIL (+8.67)
+    person_tracking_full_cm_weights_only: 40.91   # FAIL (+20.59)
+    static_mode_opacity_only_cm: 20.49            # -7.87 cm (genuine improvement)
+    gaussian_explosion_2x: true                    # hard RGB mask side effect
+    preserved_side_findings:
+      - "Hard RGB mask causes ~2x Gaussian count — pair with densify cap if ever revisited"
+      - "Static-mode improvement (-7.87) is real under hard mask alone"
+      - "tracker.py depth_scale=1.0 is load-bearing, not cosmetic"
+    regime_mismatch: DG-SLAM 0.9/0.1 weights assume DROID-VO upstream
+    decomposition_protocol: pre-registered reject-budget exceeded across 3 variants
+
   Bp_pips_cotracker_mask:
     status: REJECTED
     reason: H0 signal exists with GT poses (+68pp over YOLO on balloon) but
@@ -99,10 +120,15 @@ intervention_results:
       (local BA retroactively smooths bad poses).
 
 hypotheses_to_be_formed: []
-experiments_completed: 13
-current_findings_summary: three_rejections_same_structural_root
-  (tracker-side coupling or upstream-component dependency). The pattern
-  across C/B/B' is consistent: mapping-side or photometric-gate
-  interventions cannot reach the drift event because the tracker
-  commits a bad pose before they fire. Next interventions must target
-  the tracker side (A1 local BA, A2 retry, B3 robust loss).
+experiments_completed: 15
+current_findings_summary: five_rejections_same_meta_pattern
+  (literature recipes have hidden component dependencies our baseline
+  doesn't satisfy). Rejected: C (SplaTAM 200k init), B (DG-SLAM DROID-VO
+  upstream), B' (dense GT tracks for PIPs), A1 (MonoGS ICP + large KF
+  graph), D1 (DG-SLAM DROID-VO + retuned weight schedule).
+  Each rejected intervention has produced genuine diagnostic value:
+  sparse-map sensitivity, velocity-init dominance, mask-after-tracking
+  limits, ICP anchor dependency, weight-schedule and densification
+  couplings. Common thread: tracker drift event at frame 60-70 needs
+  a tracker-side, single-frame fix. Next = A2 (multi-hypothesis init),
+  poor-man's DROID-VO substitute.
