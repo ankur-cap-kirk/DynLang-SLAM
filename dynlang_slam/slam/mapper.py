@@ -9,7 +9,7 @@ import torch
 from ..core.gaussians import GaussianMap
 from ..core.renderer import GaussianRenderer
 from ..core.losses import compute_losses, language_loss
-from ..utils.camera import depth_to_points, fast_se3_inverse
+from ..utils.camera import depth_to_points, fast_se3_inverse, pose_to_matrix, matrix_to_pose
 
 
 class Mapper:
@@ -35,6 +35,10 @@ class Mapper:
         densify_max_scale: float = 0.05,
         iso_reg_weight: float = 0.05,
         use_soft_dynamic: bool = False,
+        refine_poses: bool = False,
+        lr_pose_trans: float = 1.0e-4,
+        lr_pose_quat: float = 5.0e-4,
+        pose_prior_weight: float = 10.0,
     ):
         self.renderer = renderer
         self.iso_reg_weight = iso_reg_weight
@@ -47,6 +51,20 @@ class Mapper:
             "colors": lr_colors,
             "lang_feats": lr_lang_feats,
         }
+        # Local BA (intervention A1): refine non-anchor keyframe poses
+        # jointly with Gaussians. Oldest KF in window stays fixed as
+        # gauge anchor to prevent trajectory rigid-body drift.
+        self.refine_poses = refine_poses
+        self.lr_pose_trans = lr_pose_trans
+        self.lr_pose_quat = lr_pose_quat
+        # MonoGS-style pose prior: penalize refinement away from the
+        # tracker's initial estimate. Without this, under-constrained
+        # regions (few valid pixels, dynamic masking, textureless walls)
+        # let the pose slide into local minima that minimize photometric
+        # loss on remaining pixels but aren't geometrically correct.
+        # Weight interpretation: each meter of translation drift costs
+        # `pose_prior_weight` loss units (vs photometric losses ~1).
+        self.pose_prior_weight = pose_prior_weight
         self.loss_weights = loss_weights or {
             "rgb_weight": 0.5,
             "depth_weight": 1.0,
@@ -121,6 +139,26 @@ class Mapper:
                 {"params": [gaussian_map.lang_feats], "lr": self.lr_config["lang_feats"]}
             )
 
+        # Local BA: promote non-anchor keyframe poses to learnable params.
+        # poses[0] is the gauge anchor (fixed). poses[1:] become (quat, trans)
+        # pairs jointly optimized with the Gaussian parameters.
+        do_refine = self.refine_poses and len(poses) > 1
+        pose_params = []  # list of (quat_param, trans_param) for poses[1:]
+        pose_init_quats = []  # frozen init quats (for pose prior loss)
+        pose_init_trans = []  # frozen init translations (for pose prior loss)
+        if do_refine:
+            for p in poses[1:]:
+                q_init, t_init = matrix_to_pose(p.detach())
+                q_param = q_init.clone().detach().requires_grad_(True)
+                t_param = t_init.clone().detach().requires_grad_(True)
+                pose_params.append((q_param, t_param))
+                pose_init_quats.append(q_init.detach().clone())
+                pose_init_trans.append(t_init.detach().clone())
+            quat_list = [qp for qp, _ in pose_params]
+            trans_list = [tp for _, tp in pose_params]
+            param_groups.append({"params": quat_list, "lr": self.lr_pose_quat})
+            param_groups.append({"params": trans_list, "lr": self.lr_pose_trans})
+
         lr_keys = ["means", "scales", "quats", "opacities", "colors"]
         optimizer = torch.optim.Adam(param_groups)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -136,9 +174,17 @@ class Mapper:
         for iteration in range(self.num_iterations):
             optimizer.zero_grad()
 
+            # Rebuild pose tensors from learnable params (poses[0] is anchor)
+            if do_refine:
+                active_poses = [poses[0]]
+                for q_param, t_param in pose_params:
+                    active_poses.append(pose_to_matrix(q_param, t_param))
+            else:
+                active_poses = poses
+
             iter_loss = 0.0
             loss_lang_total = 0.0
-            for fi, (frame, pose) in enumerate(zip(frames, poses)):
+            for fi, (frame, pose) in enumerate(zip(frames, active_poses)):
                 ds = self.render_downscale
                 if ds > 1:
                     gt_rgb_ds = torch.nn.functional.interpolate(
@@ -153,7 +199,13 @@ class Mapper:
                 gt_rgb = gt_rgb_ds.permute(1, 2, 0)
                 gt_depth = gt_depth_ds.squeeze(0)
 
-                viewmat = fast_se3_inverse(pose)
+                # fast_se3_inverse uses in-place ops which break the autograd
+                # graph through learnable pose params. Use torch.inverse
+                # (differentiable, negligible cost on 4x4) when refining.
+                if do_refine and fi > 0:
+                    viewmat = torch.inverse(pose)
+                else:
+                    viewmat = fast_se3_inverse(pose)
 
                 rendered = self.renderer(
                     gaussian_map, viewmat, K, width, height,
@@ -205,6 +257,22 @@ class Mapper:
             # Average over frames + regularization
             iso_w = getattr(self, 'iso_reg_weight', 0.05)
             iter_loss = iter_loss / len(frames) + iso_w * loss_iso
+
+            # Pose prior (MonoGS): penalize refinement away from tracker's
+            # initial estimate. Keeps under-constrained poses (few valid
+            # pixels, dynamic masking, textureless regions) from sliding
+            # into bad local minima. Quadratic so small corrections are
+            # nearly free but large drifts are heavily penalized.
+            if do_refine and self.pose_prior_weight > 0:
+                pose_prior_loss = 0.0
+                for (q_param, t_param), q_init, t_init in zip(
+                    pose_params, pose_init_quats, pose_init_trans,
+                ):
+                    pose_prior_loss = pose_prior_loss + \
+                        ((t_param - t_init) ** 2).sum() + \
+                        ((q_param - q_init) ** 2).sum()
+                iter_loss = iter_loss + self.pose_prior_weight * pose_prior_loss
+
             iter_loss.backward()
             optimizer.step()
             scheduler.step()
@@ -212,10 +280,20 @@ class Mapper:
             total_loss = iter_loss.item()
             loss_info = loss_dict
 
+        # Build final refined-poses list (anchor + param-derived) for writeback
+        # and for downstream contamination / densification calls.
+        if do_refine:
+            with torch.no_grad():
+                final_poses = [poses[0]]
+                for q_param, t_param in pose_params:
+                    final_poses.append(pose_to_matrix(q_param, t_param).detach())
+        else:
+            final_poses = poses
+
         # Mark Gaussians contaminated by dynamic objects
         if masks is not None:
             with torch.no_grad():
-                for fi, (frame, pose) in enumerate(zip(frames, poses)):
+                for fi, (frame, pose) in enumerate(zip(frames, final_poses)):
                     if fi >= len(masks) or masks[fi] is None:
                         continue
                     if (masks[fi] < 0.5).sum() == 0:
@@ -236,7 +314,7 @@ class Mapper:
                 # high-error regions (even if gradient is below threshold)
                 # Use the last frame's rendering error as a signal
                 with torch.no_grad():
-                    frame, pose = frames[-1], poses[-1]
+                    frame, pose = frames[-1], final_poses[-1]
                     ds = max(self.render_downscale, 4)  # at least 4x for speed
                     gt_rgb_ds = torch.nn.functional.interpolate(
                         frame["rgb"].unsqueeze(0), scale_factor=1.0/ds,
@@ -281,6 +359,21 @@ class Mapper:
             "lang_loss": loss_lang_total / max(self.num_iterations, 1) if use_lang else 0.0,
         }
         info.update({f"loss_{k}": v for k, v in loss_info.items()})
+
+        # Local BA: return refined poses for pipeline writeback, plus a
+        # diagnostic on how far each non-anchor pose moved from its
+        # tracker-supplied initialization.
+        if do_refine:
+            info["refined_poses"] = final_poses
+            with torch.no_grad():
+                trans_deltas = []
+                for orig, refined in zip(poses[1:], final_poses[1:]):
+                    d = (refined[:3, 3] - orig[:3, 3]).norm().item()
+                    trans_deltas.append(d)
+                info["pose_refine_trans_max_m"] = max(trans_deltas) if trans_deltas else 0.0
+                info["pose_refine_trans_mean_m"] = (
+                    sum(trans_deltas) / len(trans_deltas) if trans_deltas else 0.0
+                )
         return info
 
     def _expand_map(
