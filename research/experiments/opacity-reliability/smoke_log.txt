@@ -1,0 +1,23 @@
+============================================================
+D1 (opacity reliability + loss-weight flip) smoke test
+  BONN person_tracking, 25 frames stride=2
+============================================================
+loss.rgb_weight       = 0.9
+loss.depth_weight     = 0.1
+loss.ssim_weight      = 0.2
+loss.reliability_thresh = 0.5
+Loaded TUM sequence: rgbd_bonn_person_tracking
+  Frames: 25 | Resolution: 480x640
+Initialized 16511 Gaussians from depth map
+Initializing dynamic object detector...
+  YOLOv8 loaded: yolov8n-seg (dynamic classes: [0, 1, 2, 3, 5, 14, 15, 16, 17], persistent_gpu=True)
+  Dynamic detector ready.
+  Frame   5/24 | ATE=4.79cm | G=16511 | dyn=2.2%
+  Frame  10/24 | ATE=12.03cm | G=17175 | dyn=1.9%
+  Frame  15/24 | ATE=16.49cm | G=17175 | dyn=2.1%
+  Frame  20/24 | ATE=21.62cm | G=17186 | dyn=2.8%
+  Frame  24/24 | ATE=24.49cm | G=17224 | dyn=2.7%
+
+Final ATE RMSE (25 frames): 15.04 cm
+
+Smoke test: PASS (no NaN/Inf, ATE within sane bound)

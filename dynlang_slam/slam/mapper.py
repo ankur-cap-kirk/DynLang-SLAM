@@ -39,6 +39,8 @@ class Mapper:
         lr_pose_trans: float = 1.0e-4,
         lr_pose_quat: float = 5.0e-4,
         pose_prior_weight: float = 10.0,
+        use_hard_rgb_mask: bool = True,
+        reliability_thresh: float = 0.5,
     ):
         self.renderer = renderer
         self.iso_reg_weight = iso_reg_weight
@@ -65,6 +67,9 @@ class Mapper:
         # Weight interpretation: each meter of translation drift costs
         # `pose_prior_weight` loss units (vs photometric losses ~1).
         self.pose_prior_weight = pose_prior_weight
+        # D1 knobs: hard alpha gate for RGB vs legacy soft weighting
+        self.use_hard_rgb_mask = use_hard_rgb_mask
+        self.reliability_thresh = reliability_thresh
         self.loss_weights = loss_weights or {
             "rgb_weight": 0.5,
             "depth_weight": 1.0,
@@ -227,6 +232,8 @@ class Mapper:
                     rendered, gt_rgb, gt_depth, self.loss_weights,
                     mask=frame_mask,
                     use_soft_dynamic=self.use_soft_dynamic,
+                    use_hard_rgb_mask=self.use_hard_rgb_mask,
+                    reliability_thresh=self.reliability_thresh,
                 )
                 iter_loss = iter_loss + loss
 

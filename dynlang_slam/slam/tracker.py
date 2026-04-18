@@ -31,6 +31,8 @@ class Tracker:
         use_soft_dynamic: bool = False,
         early_stop_patience: int = 8,
         early_stop_rel_thresh: float = 0.001,
+        use_hard_rgb_mask: bool = True,
+        reliability_thresh: float = 0.5,
     ):
         self.renderer = renderer
         self.num_iterations = num_iterations
@@ -51,6 +53,9 @@ class Tracker:
         # Saves compute on easy frames and allocates iterations where needed.
         self.early_stop_patience = early_stop_patience
         self.early_stop_rel_thresh = early_stop_rel_thresh
+        # D1 knobs: hard alpha gate vs legacy soft-alpha weighting
+        self.use_hard_rgb_mask = use_hard_rgb_mask
+        self.reliability_thresh = reliability_thresh
 
     def track(
         self,
@@ -192,6 +197,8 @@ class Tracker:
                 loss, loss_dict = compute_losses(
                     rendered, gt_rgb_hw, gt_depth_hw, iter_weights, mask_ds,
                     use_soft_dynamic=self.use_soft_dynamic,
+                    use_hard_rgb_mask=self.use_hard_rgb_mask,
+                    reliability_thresh=self.reliability_thresh,
                 )
 
                 loss.backward()
