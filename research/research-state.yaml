@@ -2,7 +2,7 @@ project: DynLang-SLAM
 question: How can we close the ATE gap to SOTA 3DGS SLAM (20cm -> ~5cm) on dynamic
   scenes, using principled architectural additions rather than hyperparameter tuning?
 status: active
-phase: literature_survey_for_architectural_gap
+phase: architectural_interventions_ranked_plan
 
 target_system:
   name: DynLang-SLAM
@@ -55,13 +55,28 @@ focus_areas_under_investigation:
     adaptive schedules
 
 next_actions:
-  - receive 4 parallel literature research reports (launched)
-  - synthesize into ranked implementation recommendations
-  - pick top 1-2 interventions feasible for 2-week course timeline
-  - lock protocol, git commit, implement, measure
+  - intervention A (local BA over keyframe window, MonoGS-style): NEXT
+  - intervention D (tracking-failure retry): deferred
   - target: 20cm -> 12cm person_tracking and 57cm -> 25cm balloon would
     already be a strong story (2x improvement on each, clear method gains)
 
+intervention_results:
+  C_silhouette_gate:
+    status: REJECTED
+    reason: hard alpha > 0.95 gate collapses gradient in sparse-map regime
+    person_tracking_full_cm: 75.30  # baseline 20.32
+    balloon_full_cm: not_run
+    regime_mismatch: SplaTAM uses 200k-init and 40-iter mapping; we have 16k-init
+  B_depth_warp_mask:
+    status: REJECTED
+    reason: velocity-init pose error dominates depth residual; AND-across-window
+      erases true positives; warp adds zero class-agnostic detections
+    person_tracking_full_cm: 25.24  # baseline 20.32, budget <=22.32
+    balloon_full_cm: 60.62          # baseline 57.35, budget <=40.00
+    regime_mismatch: DG-SLAM uses DROID-VO for upstream pose; we use velocity init
+
 hypotheses_to_be_formed: []
-experiments_completed: 10
-current_findings_summary: architectural_gap_not_hyperparameter_gap
+experiments_completed: 12
+current_findings_summary: two_rejections_same_failure_mode_regime_mismatch
+  with_upstream_dependencies. Next interventions must NOT assume better
+  upstream pose, denser init, or other components we don't have.
