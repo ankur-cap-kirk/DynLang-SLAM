@@ -1,0 +1,128 @@
+============================================================
+DynLang-SLAM Full Test: BONN person_tracking
+  100 frames, stride=2
+  Language: ON | Dynamic: ON
+============================================================
+
+============================================================
+--- Mode: STATIC (dynamic=OFF, language=OFF) ---
+============================================================
+Loaded TUM sequence: rgbd_bonn_balloon
+  Frames: 100 | Resolution: 480x640
+Initialized 16391 Gaussians from depth map
+  Frame  10/99 | ATE=21.50cm | G=17765
+  Frame  20/99 | ATE=42.44cm | G=18969
+  Frame  30/99 | ATE=57.01cm | G=20538 | lang_loss=0.0000
+  Frame  40/99 | ATE=45.74cm | G=20855
+  Frame  50/99 | ATE=29.74cm | G=22002
+  Frame  60/99 | ATE=4.30cm | G=21990
+  Frame  70/99 | ATE=32.66cm | G=21936
+  Frame  80/99 | ATE=66.26cm | G=21900
+  Frame  90/99 | ATE=97.71cm | G=22075
+  Frame  99/99 | ATE=110.39cm | G=21969 | lang_loss=0.0000
+
+  STATIC Results:
+    ATE RMSE:   53.68 cm
+    Gaussians:  21969
+    Time:       153.1s (1.53s/frame)
+
+============================================================
+--- Mode: DYNAMIC (dynamic=ON, language=OFF) ---
+============================================================
+Loaded TUM sequence: rgbd_bonn_balloon
+  Frames: 100 | Resolution: 480x640
+Initialized 16391 Gaussians from depth map
+Initializing dynamic object detector...
+  YOLOv8 loaded: yolov8n-seg (dynamic classes: [0, 1, 2, 3, 5, 14, 15, 16, 17], persistent_gpu=True)
+  Dynamic detector ready.
+Loading CoTracker2 for class-agnostic dynamic mask...
+Using cache found in C:\Users\ankur/.cache\torch\hub\facebookresearch_co-tracker_main
+  CoTracker2 ready.
+  Frame  10/99 | ATE=20.59cm | G=17690 | dyn=4.5%
+  Frame  20/99 | ATE=38.30cm | G=19426 | dyn=5.0% | lang_loss=0.0000
+  Frame  30/99 | ATE=51.16cm | G=20011 | dyn=16.3%
+  Frame  40/99 | ATE=50.26cm | G=22299 | dyn=15.9%
+  Frame  50/99 | ATE=41.23cm | G=24579 | dyn=7.3%
+  Frame  60/99 | ATE=18.38cm | G=24677 | dyn=11.8%
+  Frame  70/99 | ATE=42.87cm | G=25976 | dyn=14.5%
+  Frame  80/99 | ATE=78.95cm | G=27010 | dyn=17.1%
+  Frame  90/99 | ATE=100.95cm | G=21460 | dyn=20.9%
+  Frame  99/99 | ATE=91.54cm | G=24263 | dyn=15.9%
+
+  DYNAMIC Results:
+    ATE RMSE:   55.93 cm
+    Gaussians:  24263
+    Time:       172.7s (1.73s/frame)
+    Avg dynamic: 11.3%
+
+============================================================
+--- Mode: FULL (dynamic=ON, language=ON) ---
+============================================================
+Loaded TUM sequence: rgbd_bonn_balloon
+  Frames: 100 | Resolution: 480x640
+Initialized 16391 Gaussians from depth map
+Initializing dynamic object detector...
+  YOLOv8 loaded: yolov8n-seg (dynamic classes: [0, 1, 2, 3, 5, 14, 15, 16, 17], persistent_gpu=True)
+  Dynamic detector ready.
+Loading CoTracker2 for class-agnostic dynamic mask...
+Using cache found in C:\Users\ankur/.cache\torch\hub\facebookresearch_co-tracker_main
+  CoTracker2 ready.
+  Frame  10/99 | ATE=20.59cm | G=17690 | dyn=4.5%
+Initializing language pipeline...
+C:\Users\ankur\AppData\Roaming\Python\Python314\site-packages\open_clip\factory.py:450: UserWarning: QuickGELU mismatch between final model config (quick_gelu=False) and pretrained tag 'openai' (quick_gelu=True).
+  warnings.warn(
+  Language pipeline ready.
+C:\Users\ankur\AppData\Roaming\Python\Python314\site-packages\sam2\sam2_image_predictor.py:431: UserWarning: cannot import name '_C' from 'sam2' (C:\Users\ankur\AppData\Roaming\Python\Python314\site-packages\sam2\__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  masks = self._transforms.postprocess_masks(
+  Frame  20/99 | ATE=39.02cm | G=19556 | dyn=5.0% | lang_loss=0.0000 | lang=4.3s
+  Frame  30/99 | ATE=53.95cm | G=21042 | dyn=16.3% | lang_loss=0.0000
+  Autoencoder frozen at frame 34 (steps=200, cos_quality=0.983)
+  Frame  40/99 | ATE=53.50cm | G=22404 | dyn=15.9%
+  Frame  50/99 | ATE=53.16cm | G=24175 | dyn=6.9%
+  Frame  60/99 | ATE=28.63cm | G=24903 | dyn=12.3% | lang_loss=0.0403 | lang=3.1s
+  Frame  70/99 | ATE=47.48cm | G=26064 | dyn=15.4%
+  Frame  80/99 | ATE=80.13cm | G=27387 | dyn=17.1% | lang_loss=0.0554
+  Frame  90/99 | ATE=100.50cm | G=21059 | dyn=20.9% | lang_loss=0.0574
+  Frame  99/99 | ATE=82.11cm | G=22493 | dyn=16.5%
+
+  FULL Results:
+    ATE RMSE:   57.69 cm
+    Gaussians:  22493
+    Time:       245.3s (2.45s/frame)
+    Avg dynamic: 12.0%
+    Lang feats:  21970/22493 non-zero (97.7%)
+    Lang norm:   [0.0000, 0.4055]
+    AE frozen:   True
+    Extractions: 11
+
+============================================================
+3D Text Queries on Full Pipeline Map
+============================================================
+  'person    ': relevancy=[0.942, 0.987]  raw=[0.952, 0.974]  center=(-0.03, -1.14, 4.58)
+  'human     ': relevancy=[0.999, 1.000]  raw=[0.962, 0.976]  center=(0.13, -1.09, 4.58)
+  'wall      ': relevancy=[1.000, 1.000]  raw=[0.968, 0.984]  center=(0.11, -0.89, 4.52)
+  'floor     ': relevancy=[0.946, 0.979]  raw=[0.957, 0.978]  center=(-0.94, -1.27, 4.80)
+  'table     ': relevancy=[0.967, 0.997]  raw=[0.951, 0.966]  center=(-0.56, -0.51, 4.46)
+  'chair     ': relevancy=[1.000, 1.000]  raw=[0.966, 0.987]  center=(-0.55, -0.59, 4.36)
+  'door      ': relevancy=[0.997, 1.000]  raw=[0.955, 0.975]  center=(-0.34, -1.08, 4.69)
+  'monitor   ': relevancy=[1.000, 1.000]  raw=[0.959, 0.977]  center=(-0.41, -0.46, 4.31)
+  'screen    ': relevancy=[0.913, 0.986]  raw=[0.938, 0.971]  center=(-0.33, -1.00, 4.59)
+  'shelf     ': relevancy=[0.997, 0.999]  raw=[0.957, 0.976]  center=(0.14, -0.64, 4.58)
+  'window    ': relevancy=[0.959, 0.981]  raw=[0.947, 0.970]  center=(-0.77, -1.68, 4.87)
+
+============================================================
+Final Comparison: BONN person_tracking
+============================================================
+  Metric                        Static    Dynamic       Full
+  ------------------------- ---------- ---------- ----------
+  ATE RMSE (cm)                  53.68      55.93      57.69
+  Gaussians                      21969      24263      22493
+  Time (s)                       153.1      172.7      245.3
+  Time/frame (s)                  1.53       1.73       2.45
+  Avg dynamic (%)                  N/A       11.3       12.0
+  Lang feat coverage (%)           N/A        N/A       97.7
+
+  SOTA reference: DG-SLAM = 4.73cm, BDGS-SLAM = 4.03cm
+============================================================
