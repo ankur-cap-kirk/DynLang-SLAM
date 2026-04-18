@@ -153,6 +153,8 @@ def compute_losses(
     use_huber: bool = True,
     huber_rgb_delta: float = 0.05,
     huber_depth_delta: float = 0.1,
+    reliability_thresh: float = 0.5,
+    use_hard_rgb_mask: bool = True,
 ) -> tuple[torch.Tensor, dict]:
     """Compute combined tracking/mapping loss.
 
@@ -163,6 +165,11 @@ def compute_losses(
         weights: dict with 'rgb_weight', 'depth_weight', 'ssim_weight'
         mask: optional (H, W) binary mask (1 = valid, 0 = ignore)
         use_soft_dynamic: if True, apply residual-based soft weighting
+        reliability_thresh: accumulated-opacity threshold for the Ô
+            reliability mask (DG-SLAM intervention D1). Pixels where
+            alpha <= thresh are excluded from BOTH RGB and depth loss.
+            Previously RGB used soft alpha weighting; harmonized to the
+            hard threshold that depth was already using.
 
     Returns:
         total_loss, loss_dict with individual components
@@ -186,16 +193,24 @@ def compute_losses(
     if use_soft_dynamic:
         soft_w = compute_soft_dynamic_weights(pred_rgb, gt_rgb)
 
-    # Depth validity mask: only where GT depth is valid AND map has Gaussians
-    depth_valid = ((gt_depth > 0) & (alpha_2d > 0.5)).float()
+    # Ô reliability mask (DG-SLAM): hard gate on accumulated opacity.
+    # Pixels where map coverage is weak (alpha <= thresh) contribute zero
+    # to the loss so the tracker pose is not pulled by under-mapped regions.
+    reliable = (alpha_2d > reliability_thresh).float()
+
+    # Depth validity mask: reliable map coverage AND valid GT depth
+    depth_valid = reliable * (gt_depth > 0).float()
     if mask is not None:
         depth_valid = depth_valid * mask
     if soft_w is not None:
         depth_valid = depth_valid * soft_w
 
-    # RGB loss: also weight by alpha to reduce influence of unmapped regions
-    alpha_rgb = alpha_2d.unsqueeze(-1).expand_as(pred_rgb)
-    rgb_mask = alpha_rgb
+    # RGB mask: hard reliability gate by default (D1). Toggle to soft alpha
+    # weighting (legacy / D1b decomposition test) via use_hard_rgb_mask=False.
+    if use_hard_rgb_mask:
+        rgb_mask = reliable.unsqueeze(-1).expand_as(pred_rgb)
+    else:
+        rgb_mask = alpha_2d.unsqueeze(-1).expand_as(pred_rgb)
     if mask is not None:
         rgb_mask = rgb_mask * mask.unsqueeze(-1).expand_as(pred_rgb)
     if soft_w is not None:

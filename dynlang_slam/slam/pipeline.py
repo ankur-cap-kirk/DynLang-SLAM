@@ -62,6 +62,8 @@ class SLAMPipeline:
             use_soft_dynamic=getattr(cfg.dynamic, 'enabled', False) and getattr(cfg.dynamic, 'use_soft_weights', True),
             early_stop_patience=getattr(cfg.slam.tracking, 'early_stop_patience', 8),
             early_stop_rel_thresh=getattr(cfg.slam.tracking, 'early_stop_rel_thresh', 0.001),
+            use_hard_rgb_mask=getattr(cfg.loss, 'use_hard_rgb_mask', True),
+            reliability_thresh=getattr(cfg.loss, 'reliability_thresh', 0.5),
         )
 
         # Mapper
@@ -91,6 +93,8 @@ class SLAMPipeline:
             lr_pose_trans=getattr(cfg.slam.mapping, 'lr_pose_trans', 1.0e-4),
             lr_pose_quat=getattr(cfg.slam.mapping, 'lr_pose_quat', 5.0e-4),
             pose_prior_weight=getattr(cfg.slam.mapping, 'pose_prior_weight', 10.0),
+            use_hard_rgb_mask=getattr(cfg.loss, 'use_hard_rgb_mask', True),
+            reliability_thresh=getattr(cfg.loss, 'reliability_thresh', 0.5),
         )
 
         # Keyframe management

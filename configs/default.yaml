@@ -91,11 +91,25 @@ slam:
     kf_max_interval: 15     # force KF at least this often (map coverage)
 
 # Loss weights
+# D1 (opacity reliability + weight flip) REJECTED — see
+# research/experiments/opacity-reliability/analysis.md. Both changes
+# reverted; knobs kept as config entries for future ablations.
+#
+# Key findings preserved from D1:
+#  - Our time-varying loss schedule in tracker.py (`depth_scale=1.0
+#    constant`) is tightly coupled to depth-dominant base weights.
+#    Any future weight change must retune that schedule, not just
+#    the base values.
+#  - Hard RGB reliability mask causes ~2x densification explosion
+#    via indirect gradient-magnitude coupling to the densify decision.
+#    Must be paired with a densification cap to be usable.
 loss:
-  rgb_weight: 0.5
-  depth_weight: 1.2
+  rgb_weight: 0.5             # reverted (DG-SLAM 0.9 assumes DROID-VO frontend)
+  depth_weight: 1.2           # reverted (convex-basin anchor for velocity init)
   ssim_weight: 0.2
   lang_weight: 0.1
+  reliability_thresh: 0.5     # gate for Ô mask when use_hard_rgb_mask=true
+  use_hard_rgb_mask: false    # reverted to soft-alpha (D1 rejected)
 
 # Language Features
 language:
