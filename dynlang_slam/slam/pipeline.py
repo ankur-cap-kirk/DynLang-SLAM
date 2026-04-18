@@ -87,6 +87,10 @@ class SLAMPipeline:
             densify_interval=getattr(cfg.gaussians, 'densify_interval', 5),
             densify_max_scale=getattr(cfg.gaussians, 'densify_max_scale', 0.05),
             use_soft_dynamic=getattr(cfg.dynamic, 'enabled', False) and getattr(cfg.dynamic, 'use_soft_weights', True),
+            refine_poses=getattr(cfg.slam.mapping, 'refine_poses', False),
+            lr_pose_trans=getattr(cfg.slam.mapping, 'lr_pose_trans', 1.0e-4),
+            lr_pose_quat=getattr(cfg.slam.mapping, 'lr_pose_quat', 5.0e-4),
+            pose_prior_weight=getattr(cfg.slam.mapping, 'pose_prior_weight', 10.0),
         )
 
         # Keyframe management
@@ -664,6 +668,22 @@ class SLAMPipeline:
             info["total_gaussians"] = map_info["total_gaussians"]
             if "lang_loss" in map_info:
                 info["lang_loss"] = map_info["lang_loss"]
+
+            # Local BA writeback: if the mapper refined non-anchor keyframe
+            # poses, propagate the correction to (a) the keyframe window so
+            # the next mapping call sees the corrected history, and (b) the
+            # per-frame estimated_poses so ATE computation reflects the
+            # refinement. poses[0] is anchor (unchanged), poses[1:] match
+            # the last (K-1) keyframes in self.keyframes.
+            if "refined_poses" in map_info:
+                refined = map_info["refined_poses"]
+                for i, kf in enumerate(window):
+                    kf["pose"] = refined[i].detach()
+                    kf_id = kf["frame_id"]
+                    if 0 <= kf_id < len(self.estimated_poses):
+                        self.estimated_poses[kf_id] = refined[i].detach()
+                info["pose_refine_trans_max_m"] = map_info.get("pose_refine_trans_max_m", 0.0)
+                info["pose_refine_trans_mean_m"] = map_info.get("pose_refine_trans_mean_m", 0.0)
 
             # Contamination cleanup: periodically remove Gaussians
             # corrupted by dynamic objects
