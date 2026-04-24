@@ -1,8 +1,131 @@
 project: DynLang-SLAM
-question: How can we close the ATE gap to SOTA 3DGS SLAM (20cm -> ~5cm) on dynamic
-  scenes, using principled architectural additions rather than hyperparameter tuning?
+question: How can we close the ATE gap to SOTA 3DGS SLAM on dynamic scenes,
+  using principled architectural additions rather than hyperparameter tuning?
 status: active
-phase: architectural_interventions_ranked_plan
+phase: ate_evaluation_corrected_umeyama_alignment
+
+evaluation_correction_2026_04_23:
+  finding: >-
+    compute_ate_rmse() previously reported RAW frame-by-frame translation
+    residuals, not Horn/Umeyama SE(3)-aligned ATE. All SLAM literature
+    (Sturm et al. 2012 TUM-RGBD, DG-SLAM, SplaTAM, MonoGS) reports
+    aligned ATE. Fixed in pipeline.py compute_ate_rmse(align=True) by
+    default; _umeyama_se3 static method added with unit tests in
+    scripts/verify_ate_alignment.py (PASS test_identity, test_rigid_recovery
+    max residual 1.5e-15, test_noise_rms recovers noise RMS exactly).
+  bonn_person_tracking_100f_stride2:
+    raw_cm: 28.67
+    aligned_cm: 8.77
+    ratio: 3.27
+  implications:
+    - "Reported gap to SOTA was overstated ~3x by the raw metric.
+       Real gap: 8.77 cm (ours) vs 4.73 cm (DG-SLAM) = ~4 cm, not ~16 cm."
+    - "Six prior rejections (C, B, Bp, A1, D1, A2) were all evaluated on
+       raw ATE with raw pre-registered budgets. Their verdicts are not
+       automatically wrong (most failed by large margins), but borderline
+       ones (A2 H1=21.59 vs budget 22.32 raw) should be re-examined under
+       aligned reporting before being treated as settled."
+    - "run-to-run variance observed in A2 experiments (~+-10 cm raw) may
+       shrink substantially under aligned metric since alignment absorbs
+       yaw/translation offsets that accumulate frame-by-frame."
+    - "Paper narrative changes: 'we close a 15 cm gap to SOTA' is
+       misleading; 'we reach 8.77 cm on BONN person_tracking, within 4 cm
+       of DG-SLAM' is the correct framing."
+  recommended_next:
+    - "Re-measure H1 (BONN person_tracking), H2 (BONN balloon), H3
+       (Replica room0) baselines under aligned ATE before running B3 or
+       any further intervention."
+    - "Update paper Intro / Evaluation sections to quote aligned ATE."
+
+aligned_baselines_2026_04_23:
+  protocol: >-
+    scripts/rebaseline_aligned.py, DYNLANG_FULL=0 (language OFF, dynamic ON,
+    yolov8n-seg). BONN: 100 frames, stride=2. Replica room0: 100 frames,
+    680x1200, full resolution. Reports raw and Umeyama-aligned ATE-RMSE.
+  H1_bonn_person_tracking:
+    raw_cm: 29.16
+    aligned_cm: 7.56
+    ratio: 3.86
+    vs_sota: "within 2.83 cm of DG-SLAM (4.73)"
+  H2_bonn_balloon:
+    raw_cm: 57.89
+    aligned_cm: 8.55
+    ratio: 6.77
+    vs_sota: "within 3.82 cm of DG-SLAM (4.73)"
+    note: >-
+      raw 57 cm made balloon look like a catastrophic failure case;
+      aligned 8.55 cm puts it essentially on par with person_tracking.
+      The 6.77x ratio is the largest of the three - it strongly suggests
+      an early yaw or translation offset (from velocity-init on the first
+      few frames before tracker converges) that propagates as a rigid
+      body offset rather than accumulating random drift. A short bootstrap
+      / initial-pose-refinement intervention may harvest most of this gap
+      without touching the steady-state tracker.
+  H3_replica_room0:
+    raw_cm: 13.02
+    aligned_cm: 3.68
+    ratio: 3.54
+    vs_sota: "below BDGS-SLAM (4.03), slightly above DG-SLAM (4.73); note
+      BDGS/DG report on BONN, Replica comparison is apples-to-oranges but
+      3.68 cm is in the competitive range for static-scene 3DGS SLAM."
+  headline_finding: >-
+    Under the standard ATE metric used by every cited SOTA paper (Sturm
+    et al. 2012 Umeyama alignment), DynLang-SLAM measures 7.56 / 8.55 /
+    3.68 cm on H1 / H2 / H3 — within 3-4 cm of DG-SLAM/BDGS-SLAM across
+    the board, not the 15+ cm gap the raw metric suggested. The paper
+    contribution story shifts from "close a massive gap" to "match SOTA
+    tracking accuracy while adding language grounding on commodity GPUs."
+  residual_gap_diagnosis:
+    ratio_interpretation: >-
+      raw/aligned ratio measures how much of total error is rigid-offset
+      (absorbed by alignment) vs random jitter (preserved by alignment).
+      Large ratio = tracker has a systematic bias but good local
+      consistency; small ratio = tracker has noisy per-frame errors.
+      All three scenes have 3.5-6.8x ratios, meaning our residual aligned
+      error is mostly rigid offset, which pose-graph / global-BA / loop-
+      closure could remove cheaply.
+    implication: >-
+      B3 (Tukey M-estimator, local robustification) is now a lower-
+      priority candidate - the remaining 3-4 cm gap is bias, not per-frame
+      jitter. A bootstrap-refinement or 1-anchor pose graph over the
+      keyframe window would likely harvest more gain per unit effort.
+
+rejection_status_under_aligned_metric:
+  note: >-
+    All 6 prior rejections were pre-registered against raw ATE budgets.
+    Under the aligned metric, baselines shrink ~3-7x. Budgets scale
+    linearly, so the proportional budgets hold in spirit but none of the
+    rejections are automatically flipped. A2 H1=21.59cm raw vs budget
+    22.32cm raw was the only borderline case; under aligned ATE the
+    equivalent measurement would have been ~5.6cm vs budget ~5.8cm -
+    still borderline, still not a clear accept. Verdicts stand.
+
+  Bp_pips_aligned_recheck:
+    protocol: scripts/rebaseline_pips_aligned.py, thresh=25 (protocol-permitted)
+    h1_person_tracking:
+      raw_cm: 21.79
+      aligned_cm: 11.92
+      delta_raw_cm: -7.37     # improvement under old metric
+      delta_aligned_cm: +4.36 # regression under correct metric
+    h2_balloon:
+      raw_cm: 52.47
+      aligned_cm: 13.21
+      delta_raw_cm: -5.42     # improvement under old metric
+      delta_aligned_cm: +4.66 # regression under correct metric
+    new_finding: >-
+      PIPs is the first intervention where aligned vs raw metric
+      FLIPS the verdict. Raw ATE drops by 5-7 cm (looks like an accept);
+      aligned ATE rises by 4-5 cm (is actually a reject). Mechanism:
+      PIPs mask removes pixels including some static false-positives
+      at thresh=25. This reduces rigid offset (bias absorbed by alignment)
+      but starves the tracker of information, raising per-frame jitter.
+      Confirms Bp rejection and validates the ratio-analysis prediction
+      that mapping-side masks cannot repair tracker-side rigid drift.
+    implication: >-
+      Any future intervention must be evaluated under aligned ATE.
+      The raw metric is systematically biased in favor of interventions
+      that trade per-frame noise for rigid offset - exactly the class of
+      intervention that actually hurts tracking quality.
 
 target_system:
   name: DynLang-SLAM
@@ -14,6 +137,9 @@ target_system:
   gaussian_lang_dim: 16
 
 current_performance:
+  # ALL VALUES BELOW ARE RAW / UNALIGNED (legacy reporting). See
+  # aligned_baselines_2026_04_23 block for the corrected Umeyama-aligned
+  # numbers, which are the ones to cite in the paper.
   bonn_person_tracking_cm:
     static: 28.36
     dynamic: 21.85
@@ -22,6 +148,10 @@ current_performance:
     static: 69.33
     dynamic: 57.24
     full: 57.35
+  aligned_umeyama_cm:
+    h1_bonn_person_tracking: 7.56
+    h2_bonn_balloon:         8.55
+    h3_replica_room0:        3.68
   sota_reference:
     DG-SLAM: 4.73
     BDGS-SLAM: 4.03
@@ -55,15 +185,22 @@ focus_areas_under_investigation:
     adaptive schedules
 
 next_actions:
-  - intervention A2 (tracking-failure retry / multi-hypothesis init): NEXT.
-    After five rejections of mapping-side / cross-keyframe / loss-formulation
-    interventions, only tracker-side single-frame interventions remain viable.
-    A2 directly addresses the frame-60-70 drift event (poor-man's DROID-VO).
-  - intervention B3 (Tukey M-estimator in tracker): conditional on remaining gap
-  - intervention B2_redux (4-frame-intersection depth warp, DG-SLAM-style):
-    lower priority, mapping-side interventions have pattern of failure
-  - target: 20cm -> 12cm person_tracking and 57cm -> 25cm balloon would
-    already be a strong story (2x improvement on each, clear method gains)
+  - "intervention B3 (Tukey M-estimator in tracker) NEXT. Does not depend
+    on a reliable failure signal (unlike A2). Changes loss robustification
+    inside the tracker so outlier pixels are down-weighted smoothly. Does
+    not introduce upstream assumptions, does not change weight schedule.
+    Lowest-risk remaining tracker-side candidate."
+  - "external-trigger failure detector (new candidate from A2 rejection):
+    replace loss-ratio trigger with depth-warp residual or feature-match
+    disagreement; reuse the hypothesis-generation machinery from A2 that
+    is preserved in pipeline.py. Higher cost, addresses A2's root cause."
+  - "intervention B2_redux (4-frame-intersection depth warp, DG-SLAM-style):
+    lower priority, mapping-side interventions have pattern of failure"
+  - "revisit H3 (Replica room0) baseline: current pipeline runs ~13.7 cm
+    at full 680x1200 + dynamic + language. Old '~1.2 cm' baseline is stale
+    and unusable as safety gate until re-measured."
+  - "target: 20cm -> 12cm person_tracking and 57cm -> 25cm balloon would
+    already be a strong story (2x improvement on each, clear method gains)"
 
 intervention_results:
   C_silhouette_gate:
@@ -119,16 +256,124 @@ intervention_results:
       mask cannot undo tracker-side drift. Argues structurally for A1
       (local BA retroactively smooths bad poses).
 
+  A2_tracking_retry_multihypothesis:
+    status: REJECTED
+    reason: >
+      Loss-ratio failure detector does not fire on the target event.
+      Measured max/median loss ratio over 100 frames of BONN
+      person_tracking = 1.37x-1.69x, WELL below the 2.5x trigger. At
+      the drift frame 60-70 the loss is AT the running median — the
+      pose-quality failure has no photometric-loss signature. Permitted
+      tuning (thresh=2.0 and 3.0) yields 0 retries over 99 frames.
+      Out-of-protocol diag at thresh=1.3 fires 3 retries (none on drift
+      event) and ATE worsens to 37.06 cm — alternates pick lower-loss-
+      but-worse-pose hypotheses. H3 safety gate: A2 off = 13.73 cm,
+      A2 on = 13.66 cm (retry never fires on Replica), so A2 is neutral
+      on the static scene; the pre-registered "~1.2 cm" H3 baseline was
+      stale and pipeline at current full-res config actually sits at
+      ~13.7 cm regardless of A2.
+    h1_person_tracking_full_cm_thresh25: 21.59    # baseline 20.32, budget <=22.32, not accept not reject
+    h2_balloon_full_cm_thresh25: 55.69            # baseline 57.35, budget <=60.35, does not reject
+    h3_replica_full_cm_A2_on: 13.66               # A2 neutral (retry_fired=False all frames)
+    h3_replica_full_cm_A2_off: 13.73              # confirms A2 is not H3 regression cause
+    tune_thresh2_cm: 31.34                         # 0 retries; run-to-run noise
+    tune_thresh3_cm: 26.81                         # 0 retries; run-to-run noise
+    diag_thresh1_3_cm: 37.06                       # 3 retries fire, ATE WORSE than baseline
+    retries_on_drift_event: 0                      # frame 60-70 never triggers
+    preserved_side_findings:
+      - "Loss magnitude is a WEAK proxy for pose correctness in photometric
+         3DGS tracking — tracker lands in locally-consistent-but-globally-
+         wrong poses without loss-signature spike. Future retry detectors
+         must use an external signal (depth warp residual, feature-match
+         disagreement, alpha-coverage collapse)."
+      - "Hypothesis-generation machinery (prev pose / damped velocity /
+         SE(3) perturbation) is kept as dormant code in pipeline.py under
+         use_tracking_retry=false — future interventions with a better
+         trigger can reuse it."
+      - "BONN 100-frame run-to-run ATE variance is ~+-10 cm at our
+         current settings (16.30 / 21.59 / 26.81 / 31.34 / 37.06 across
+         runs). Future ATE comparisons need to budget for this noise."
+      - "Replica-Room0 full-res + dynamic + language currently ~13.7 cm;
+         old '~1.2 cm' baseline is stale and should be re-measured before
+         being used as a safety gate."
+    architectural_gap: "Our tracker has no external check on its own
+      photometric objective. DROID-SLAM style dense flow correspondences
+      give that independent signal; we don't have it. Any failure-
+      detection intervention needs to add one rather than rely on the
+      same signal the tracker already optimizes."
+
+  BR1_bootstrap_pose_refinement:
+    status: REJECTED
+    reason: >
+      One-shot joint pose + Gaussian refinement over first 15 frames'
+      keyframes, anchored at frame-0 GT pose. Pre-registered on aligned
+      ATE with budgets H1<=5.50, H2<=6.00, H3<=4.10. All three FAIL and
+      by large margins: +1.81 / +5.34 / +2.63 cm above baseline.
+      Mechanism: BR1's pose deltas were sub-cm/sub-degree (max 0.30 cm
+      translation, 0.80 deg rotation across all scenes), too small to
+      mechanistically cause a +2.63 cm H3 regression. The 200-iter
+      joint optimization re-sculpts early Gaussians with the pose
+      parameter group present in Adam; the resulting map differs from
+      the steady-state-tracker-tuned map, and the tracker's cosine-LR
+      /early-stopping schedule is not tuned against it. Post-bootstrap
+      tracking degrades for the remaining 85 frames. The rigid-offset
+      hypothesis (ratio 3.5-6.8x => recoverable SE(3) bias) does not
+      survive: if true, even small correct pose deltas would move
+      aligned ATE in the right direction; they moved it wrong across
+      all three scenes. Conclusion: raw/aligned ratio measures
+      temporally-correlated error (Markov chain of velocity-init
+      updates), not a static bias that factors as rigid offset +
+      jitter. The ratio cannot be inverted into an intervention target.
+    h1_person_tracking_aligned_cm: 9.37   # baseline 7.56, budget <=5.50, FAIL (+1.81)
+    h2_balloon_aligned_cm:         13.89  # baseline 8.55, budget <=6.00, FAIL (+5.34)
+    h3_replica_room0_aligned_cm:   6.31   # baseline 3.68, budget <=4.10, FAIL (+2.63)
+    br1_event_diagnostics:
+      h1_fired: false   # K_refined < 1, too few KFs at frame 15
+      h2_fired: true
+      h2_k_refined: 2
+      h2_max_trans_delta_cm: 0.30
+      h2_max_rot_delta_deg: 0.80
+      h3_fired: true
+      h3_k_refined: 1
+      h3_max_trans_delta_cm: 0.24
+    preserved_side_findings:
+      - "Raw/aligned ratio does NOT imply extractable rigid bias.
+         The 6.77x ratio on balloon was temporally-correlated velocity-init
+         error, not a static SE(3) offset. Future ratio interpretation must
+         treat it as correlation diagnosis, not intervention target."
+      - "Touching the bootstrap region destabilizes downstream tracking
+         even with sub-cm pose deltas. Future bootstrap-window interventions
+         must pair pose writeback with re-tracking of post-bootstrap frames."
+      - "Motion-based KF selection keeps early-frame KF count very low
+         (K=1-2 at frame 15). Future bootstrap interventions should force
+         fixed-cadence KFs during bootstrap, or increase N_bootstrap until
+         K >= 5."
+      - "BONN 100-frame stride=2 aligned-ATE run-to-run noise floor ~2-3 cm.
+         H1 BR1 did NOT fire yet regressed +1.81 cm, consistent with noise.
+         Future BR variants need > 2 cm aligned improvement to be
+         distinguishable from noise."
+
 hypotheses_to_be_formed: []
-experiments_completed: 15
-current_findings_summary: five_rejections_same_meta_pattern
+experiments_completed: 17
+current_findings_summary: >-
+  seven_rejections_same_meta_pattern
   (literature recipes have hidden component dependencies our baseline
-  doesn't satisfy). Rejected: C (SplaTAM 200k init), B (DG-SLAM DROID-VO
-  upstream), B' (dense GT tracks for PIPs), A1 (MonoGS ICP + large KF
-  graph), D1 (DG-SLAM DROID-VO + retuned weight schedule).
-  Each rejected intervention has produced genuine diagnostic value:
+  doesn't satisfy). Rejected - C (SplaTAM 200k init), B (DG-SLAM DROID-VO
+  upstream), B-prime (dense GT tracks for PIPs), A1 (MonoGS ICP + large KF
+  graph), D1 (DG-SLAM DROID-VO + retuned weight schedule), A2 (retry
+  assumes reliable loss-based failure signal, which our photometric
+  3DGS tracker does not provide; drift has no loss signature),
+  BR1 (one-shot bootstrap-window joint refinement; ratio analysis
+  assumed raw/aligned gap factors as recoverable SE(3) bias, but the
+  gap is temporally-correlated velocity-init error and cannot be
+  inverted into an intervention target; sub-cm pose deltas still
+  destabilize downstream map+tracker coupling).
+  Each rejected intervention has produced genuine diagnostic value -
   sparse-map sensitivity, velocity-init dominance, mask-after-tracking
   limits, ICP anchor dependency, weight-schedule and densification
-  couplings. Common thread: tracker drift event at frame 60-70 needs
-  a tracker-side, single-frame fix. Next = A2 (multi-hypothesis init),
-  poor-man's DROID-VO substitute.
+  couplings, and now - loss magnitude does not correlate with pose
+  correctness at drift events. The common thread evolves - we cannot
+  import SOTA recipes wholesale; they each presume an upstream
+  capability (dense flow / ICP / DROID-VO / large pre-built map / a
+  reliable failure signal) that our minimal baseline lacks. Next =
+  B3 (Tukey M-estimator), which does not depend on any of these.

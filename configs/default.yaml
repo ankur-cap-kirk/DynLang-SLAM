@@ -95,6 +95,24 @@ slam:
     # not magnitude-driven (see analysis.md).
     pose_prior_weight: 10.0
 
+  # Bootstrap-window joint pose refinement (intervention BR1).
+  # REJECTED — see research/experiments/bootstrap-refinement/analysis.md.
+  # All three scenes failed pre-registered aligned-ATE budgets:
+  # H1 9.37 (budget 5.50), H2 13.89 (budget 6.00), H3 6.31 (budget 4.10).
+  # Pose deltas were sub-cm but the 200-iter joint optimization re-sculpts
+  # the early Gaussians and destabilizes downstream tracking. Ratio
+  # analysis hypothesis (raw/aligned gap = recoverable SE(3) bias) did
+  # not survive: gap is temporally-correlated velocity-init error, not
+  # a static offset that can be inverted into an intervention target.
+  # Knobs kept as dormant config; default off.
+  bootstrap:
+    enabled: false         # REJECTED; default off
+    n_frames: 15           # trigger at frame index N (refine KFs in [0, N])
+    iterations: 200        # joint pose + Gaussian optimization steps
+    lr_pose_trans: 1.0e-4  # match A1 (conservative)
+    lr_pose_quat: 5.0e-4
+    pose_prior_weight: 10.0
+
   # Keyframe selection
   keyframe:
     every_n_frames: 5       # legacy fallback (unused when motion-based)
