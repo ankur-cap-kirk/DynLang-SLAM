@@ -31,9 +31,11 @@ from dynlang_slam.core.gaussians import GaussianMap
 from dynlang_slam.slam.pipeline import SLAMPipeline
 
 # ---- Config ----
-SEQUENCE = os.path.join(PROJECT_ROOT, "data", "BONN", "rgbd_bonn_balloon")
-N_FRAMES = 100
-STRIDE = 2
+# SEQUENCE can be overridden via DYNLANG_SEQUENCE env var (just the BONN subdir name)
+_SEQ_NAME = os.environ.get("DYNLANG_SEQUENCE", "rgbd_bonn_person_tracking")
+SEQUENCE = os.path.join(PROJECT_ROOT, "data", "BONN", _SEQ_NAME)
+N_FRAMES = int(os.environ.get("DYNLANG_N_FRAMES", "100"))
+STRIDE = int(os.environ.get("DYNLANG_STRIDE", "2"))
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "results", "bonn_full_test")
 
 # Text queries for 3D search after SLAM
@@ -45,7 +47,7 @@ TEXT_QUERIES = [
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 print("=" * 60)
-print(f"DynLang-SLAM Full Test: BONN person_tracking")
+print(f"DynLang-SLAM Full Test: BONN {_SEQ_NAME}")
 print(f"  {N_FRAMES} frames, stride={STRIDE}")
 print(f"  Language: ON | Dynamic: ON")
 print("=" * 60)
@@ -231,7 +233,7 @@ else:
 
 # ---- Final Comparison Table ----
 print(f"\n{'='*60}")
-print("Final Comparison: BONN person_tracking")
+print(f"Final Comparison: BONN {_SEQ_NAME}")
 print(f"{'='*60}")
 print(f"  {'Metric':<25s} {'Static':>10s} {'Dynamic':>10s} {'Full':>10s}")
 print(f"  {'-'*25} {'-'*10} {'-'*10} {'-'*10}")
