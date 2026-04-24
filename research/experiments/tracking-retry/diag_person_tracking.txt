@@ -1,0 +1,25 @@
+============================================================
+A2 diagnostic: rgbd_bonn_person_tracking, 100 frames stride=2
+============================================================
+use_tracking_retry      = True
+retry_loss_ratio_thresh = 2.5
+Loaded TUM sequence: rgbd_bonn_person_tracking
+  Frames: 100 | Resolution: 480x640
+Initialized 16511 Gaussians from depth map
+Initializing dynamic object detector...
+  YOLOv8 loaded: yolov8n-seg (dynamic classes: [0, 1, 2, 3, 5, 14, 15, 16, 17], persistent_gpu=True)
+  Dynamic detector ready.
+  Frame  10/99 | ATE=9.60cm | loss=0.0723 | G=16511 | retry_total=0
+  Frame  20/99 | ATE=20.73cm | loss=0.0789 | G=20300 | retry_total=0
+  Frame  30/99 | ATE=11.76cm | loss=0.0914 | G=22486 | retry_total=0
+  Frame  40/99 | ATE=16.85cm | loss=0.0874 | G=28209 | retry_total=0
+  Frame  50/99 | ATE=9.07cm | loss=0.0515 | G=30619 | retry_total=0
+  Frame  60/99 | ATE=15.08cm | loss=0.0535 | G=31588 | retry_total=0
+  Frame  70/99 | ATE=25.82cm | loss=0.0737 | G=31674 | retry_total=0
+  Frame  80/99 | ATE=21.97cm | loss=0.0791 | G=31617 | retry_total=0
+  Frame  90/99 | ATE=7.08cm | loss=0.0723 | G=31636 | retry_total=0
+  Frame  99/99 | ATE=32.34cm | loss=0.0843 | G=25099 | retry_total=0
+
+Final ATE RMSE: 16.30 cm in 119.5s
+Retry events: 0 / 99 frames
+Loss: min=0.0477 med=0.0732 max=0.1023 max/med=1.40x

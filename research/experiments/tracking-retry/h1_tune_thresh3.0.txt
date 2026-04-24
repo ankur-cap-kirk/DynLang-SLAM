@@ -1,0 +1,8 @@
+== tune: seq=rgbd_bonn_person_tracking thresh=3.0 nhyp=4 ==
+Loaded TUM sequence: rgbd_bonn_person_tracking
+  Frames: 100 | Resolution: 480x640
+Initialized 16511 Gaussians from depth map
+Initializing dynamic object detector...
+  YOLOv8 loaded: yolov8n-seg (dynamic classes: [0, 1, 2, 3, 5, 14, 15, 16, 17], persistent_gpu=True)
+  Dynamic detector ready.
+ATE=26.81cm | retries=0/99 | loss med=0.0599 max=0.1015 max/med=1.69x | 122.5s
