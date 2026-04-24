@@ -14,7 +14,8 @@ from ..core.gaussians import GaussianMap
 from ..core.renderer import GaussianRenderer
 from .tracker import Tracker
 from .mapper import Mapper
-from ..utils.camera import fast_se3_inverse
+from ..core.losses import compute_losses
+from ..utils.camera import fast_se3_inverse, pose_to_matrix, matrix_to_pose
 
 
 class SLAMPipeline:
@@ -147,6 +148,21 @@ class SLAMPipeline:
         self.pips_dilation = int(getattr(pips_cfg, 'dilation_kernel', 15)) if pips_cfg else 15
         self._pips_buffer = None
         self._pips_model = None
+
+        # Bootstrap-window joint pose refinement (BR1).
+        # One-shot retroactive co-optimization of the first N_bootstrap
+        # keyframes' poses with the Gaussian map. Targets the rigid-offset
+        # residual revealed by the raw/aligned ATE ratio analysis.
+        # See research/experiments/bootstrap-refinement/protocol.md.
+        bs_cfg = getattr(cfg.slam, 'bootstrap', None)
+        self.bootstrap_enabled = bool(bs_cfg and getattr(bs_cfg, 'enabled', False))
+        self.bootstrap_n_frames = int(getattr(bs_cfg, 'n_frames', 15)) if bs_cfg else 15
+        self.bootstrap_iterations = int(getattr(bs_cfg, 'iterations', 200)) if bs_cfg else 200
+        self.bootstrap_lr_trans = float(getattr(bs_cfg, 'lr_pose_trans', 1.0e-4)) if bs_cfg else 1.0e-4
+        self.bootstrap_lr_quat = float(getattr(bs_cfg, 'lr_pose_quat', 5.0e-4)) if bs_cfg else 5.0e-4
+        self.bootstrap_pose_prior = float(getattr(bs_cfg, 'pose_prior_weight', 10.0)) if bs_cfg else 10.0
+        self._bootstrap_fired = False
+        self._bootstrap_gmap_ref = None
 
     def _should_add_keyframe(self, pose: torch.Tensor, frame_id: int) -> bool:
         """Motion-based keyframe selection.
@@ -385,6 +401,196 @@ class SLAMPipeline:
 
         return compressed_map
 
+    def _build_retry_hypotheses(
+        self,
+        primary_init: torch.Tensor,
+    ) -> list[tuple[str, torch.Tensor]]:
+        """Build alternate init poses for tracking-failure retry (intervention A2).
+
+        Returns list of (label, pose) tuples NOT including the primary.
+        Each alternate is an educated guess at what the true pose may be
+        when velocity-init lands in a bad local minimum:
+
+          * 'prev' — previous pose (zero-velocity / stationary hypothesis)
+          * 'half_vel' — halfway between prev and velocity-extrapolated prediction
+          * 'perturb' — velocity-init with deterministic SE(3) perturbation
+                       (+yaw_perturb_deg, +trans_perturb_m along optical axis)
+
+        Deterministic (no RNG) so runs are reproducible for the pre-registered
+        protocol (see research/experiments/tracking-retry/protocol.md).
+        """
+        hypotheses: list[tuple[str, torch.Tensor]] = []
+
+        cfg_tr = self.cfg.slam.tracking
+        num_hyp = int(getattr(cfg_tr, 'retry_num_hypotheses', 4))
+        yaw_deg = float(getattr(cfg_tr, 'retry_yaw_perturb_deg', 3.0))
+        trans_m = float(getattr(cfg_tr, 'retry_trans_perturb_m', 0.02))
+
+        # Need at least the previous pose for any alternate
+        if not self.estimated_poses:
+            return hypotheses
+
+        prev = self.estimated_poses[-1]
+
+        # Hypothesis 2: zero-velocity (previous pose verbatim)
+        if num_hyp >= 2:
+            hypotheses.append(("prev", prev.clone()))
+
+        # Hypothesis 3: damped velocity (midpoint of prev and velocity-init)
+        if num_hyp >= 3:
+            # Translation midpoint
+            half_t = 0.5 * (prev[:3, 3] + primary_init[:3, 3])
+            # Rotation: we take the primary_init's rotation as-is (SLERP would
+            # be cleaner but "damped" applies mainly to translation; yaw drift
+            # is usually small between successive frames).
+            half = primary_init.clone()
+            half[:3, 3] = half_t
+            hypotheses.append(("half_vel", half))
+
+        # Hypothesis 4: velocity-init + deterministic SE(3) perturbation
+        if num_hyp >= 4:
+            yaw_rad = yaw_deg * (torch.pi / 180.0)
+            c = torch.cos(torch.tensor(yaw_rad, device=primary_init.device,
+                                       dtype=primary_init.dtype))
+            s = torch.sin(torch.tensor(yaw_rad, device=primary_init.device,
+                                       dtype=primary_init.dtype))
+            # Yaw rotation about camera Y axis (scene up for most frames);
+            # applied in camera frame by right-multiplying primary_init
+            Ry = torch.eye(4, device=primary_init.device, dtype=primary_init.dtype)
+            Ry[0, 0] = c
+            Ry[0, 2] = s
+            Ry[2, 0] = -s
+            Ry[2, 2] = c
+            # Translation along optical axis (+Z in camera frame)
+            T_z = torch.eye(4, device=primary_init.device, dtype=primary_init.dtype)
+            T_z[2, 3] = trans_m
+            perturbed = primary_init @ Ry @ T_z
+            hypotheses.append(("perturb", perturbed))
+
+        # Additional hypotheses (for permitted tuning to num_hyp ∈ {5, 6})
+        if num_hyp >= 5:
+            # Negative yaw
+            yaw_rad = -yaw_deg * (torch.pi / 180.0)
+            c = torch.cos(torch.tensor(yaw_rad, device=primary_init.device,
+                                       dtype=primary_init.dtype))
+            s = torch.sin(torch.tensor(yaw_rad, device=primary_init.device,
+                                       dtype=primary_init.dtype))
+            Ry = torch.eye(4, device=primary_init.device, dtype=primary_init.dtype)
+            Ry[0, 0] = c
+            Ry[0, 2] = s
+            Ry[2, 0] = -s
+            Ry[2, 2] = c
+            perturbed = primary_init @ Ry
+            hypotheses.append(("perturb_neg_yaw", perturbed))
+
+        if num_hyp >= 6:
+            # Backward translation along optical axis
+            T_z = torch.eye(4, device=primary_init.device, dtype=primary_init.dtype)
+            T_z[2, 3] = -trans_m
+            perturbed = primary_init @ T_z
+            hypotheses.append(("perturb_neg_z", perturbed))
+
+        return hypotheses
+
+    def _retry_track(
+        self,
+        gaussian_map: GaussianMap,
+        rgb: torch.Tensor,
+        depth: torch.Tensor,
+        primary_init: torch.Tensor,
+        dynamic_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, dict, dict]:
+        """Tracking with A2 multi-hypothesis retry on detected failure.
+
+        Always runs the primary (velocity-init) first. If its final_loss is
+        too high relative to the recent median, re-runs the tracker with
+        additional init poses and keeps the hypothesis with lowest final loss.
+
+        Returns:
+            est_pose: (4, 4) best camera-to-world pose
+            track_info: tracker info dict for the winning hypothesis
+            retry_diag: diagnostic dict {retry_fired, retry_winner, num_tried, losses}
+        """
+        cfg_tr = self.cfg.slam.tracking
+        use_retry = bool(getattr(cfg_tr, 'use_tracking_retry', False))
+        ratio_thresh = float(getattr(cfg_tr, 'retry_loss_ratio_thresh', 2.5))
+        warmup = int(getattr(cfg_tr, 'retry_warmup_frames', 5))
+
+        retry_diag = {
+            "retry_fired": False,
+            "retry_winner": "primary",
+            "num_hypotheses_tried": 1,
+            "losses": {},
+        }
+
+        # Primary pass (velocity-init)
+        est_pose, track_info = self.tracker.track(
+            gaussian_map=gaussian_map,
+            gt_rgb=rgb,
+            gt_depth=depth,
+            K=self.K,
+            width=self.width,
+            height=self.height,
+            init_pose=primary_init,
+            mask=dynamic_mask,
+        )
+        primary_loss = float(track_info["final_loss"])
+        retry_diag["losses"]["primary"] = primary_loss
+
+        if not use_retry:
+            return est_pose, track_info, retry_diag
+
+        # Warmup: not enough history for a meaningful median
+        if len(self._recent_losses) < warmup:
+            return est_pose, track_info, retry_diag
+
+        # Failure detection: is primary_loss much worse than recent median?
+        recent = list(self._recent_losses)[-10:]
+        if not recent:
+            return est_pose, track_info, retry_diag
+        med = float(np.median(np.asarray(recent)))
+        if med <= 1e-12:
+            return est_pose, track_info, retry_diag  # degenerate; skip
+        if primary_loss <= ratio_thresh * med:
+            return est_pose, track_info, retry_diag
+
+        # --- FIRE: primary likely in local minimum. Run alternates. ---
+        retry_diag["retry_fired"] = True
+        retry_diag["trigger_ratio"] = primary_loss / med
+
+        best_pose = est_pose
+        best_info = track_info
+        best_loss = primary_loss
+        best_label = "primary"
+
+        hypotheses = self._build_retry_hypotheses(primary_init)
+        for label, init_pose in hypotheses:
+            try:
+                alt_pose, alt_info = self.tracker.track(
+                    gaussian_map=gaussian_map,
+                    gt_rgb=rgb,
+                    gt_depth=depth,
+                    K=self.K,
+                    width=self.width,
+                    height=self.height,
+                    init_pose=init_pose,
+                    mask=dynamic_mask,
+                )
+            except Exception as e:
+                retry_diag["losses"][label] = f"error:{type(e).__name__}"
+                continue
+            alt_loss = float(alt_info["final_loss"])
+            retry_diag["losses"][label] = alt_loss
+            if alt_loss < best_loss:
+                best_loss = alt_loss
+                best_pose = alt_pose
+                best_info = alt_info
+                best_label = label
+
+        retry_diag["num_hypotheses_tried"] = 1 + len(hypotheses)
+        retry_diag["retry_winner"] = best_label
+        return best_pose, best_info, retry_diag
+
     def process_frame(
         self,
         gaussian_map: GaussianMap,
@@ -461,17 +667,27 @@ class SLAMPipeline:
             else:
                 init_pose = gt_pose
 
-            est_pose, track_info = self.tracker.track(
+            # A2: multi-hypothesis retry on tracking failure
+            est_pose, track_info, retry_diag = self._retry_track(
                 gaussian_map=gaussian_map,
-                gt_rgb=rgb,
-                gt_depth=depth,
-                K=self.K,
-                width=self.width,
-                height=self.height,
-                init_pose=init_pose,
-                mask=dynamic_mask,
+                rgb=rgb,
+                depth=depth,
+                primary_init=init_pose,
+                dynamic_mask=dynamic_mask,
             )
             info["tracking_loss"] = track_info["final_loss"]
+            info["retry_fired"] = retry_diag["retry_fired"]
+            info["retry_winner"] = retry_diag["retry_winner"]
+            info["num_hypotheses_tried"] = retry_diag["num_hypotheses_tried"]
+            if retry_diag["retry_fired"]:
+                info["retry_trigger_ratio"] = retry_diag.get("trigger_ratio")
+                info["retry_losses"] = retry_diag["losses"]
+
+            # Update recent-loss history for A2's failure detector.
+            # Appended AFTER retry decision (uses the winning-hypothesis loss)
+            # so the median reflects the system's actual performance envelope,
+            # not the pre-retry primary loss that may have been a local minimum.
+            self._recent_losses.append(float(track_info["final_loss"]))
 
             # Motion magnitude clamping: if the estimated pose jumps too far
             # from the previous pose, clamp to a reasonable distance.
@@ -705,26 +921,279 @@ class SLAMPipeline:
 
         return info
 
-    def compute_ate_rmse(self, gt_poses: list[torch.Tensor] = None) -> float:
-        """Compute ATE RMSE over all processed frames.
+    def _run_bootstrap_refinement(self) -> dict:
+        """BR1: one-shot joint pose+Gaussian refinement over bootstrap KFs.
+
+        Fires exactly once at frame `bootstrap_n_frames`. Takes all keyframes
+        accumulated so far, anchors keyframes[0] (seeded from GT pose), and
+        co-optimizes the remaining keyframe poses + Gaussian parameters against
+        the standard photometric+depth+SSIM loss with a MonoGS-style pose
+        prior pulling refinement toward the tracker's initial estimate.
+
+        Refined poses are written back to `self.keyframes[i]["pose"]` AND
+        `self.estimated_poses[frame_id]` so ATE computation reflects the
+        correction.
+
+        Returns a diagnostic dict with per-KF pose deltas.
+        """
+        kfs = self.keyframes
+        K = len(kfs)
+        if K < 2:
+            return {"bootstrap_skipped": "too_few_keyframes", "K": K}
+
+        device = self.device
+        # Gather frames & poses
+        frames = [kf["frame"] for kf in kfs]
+        init_poses = [kf["pose"].detach().clone() for kf in kfs]
+        masks = [kf.get("dynamic_mask") for kf in kfs] if self.dynamic_enabled else [None] * K
+
+        # Build learnable (quat, trans) for poses[1:]; anchor poses[0].
+        pose_params: list[tuple[torch.Tensor, torch.Tensor]] = []
+        init_quats: list[torch.Tensor] = []
+        init_trans: list[torch.Tensor] = []
+        for p in init_poses[1:]:
+            q_init, t_init = matrix_to_pose(p)
+            q_param = q_init.clone().detach().requires_grad_(True)
+            t_param = t_init.clone().detach().requires_grad_(True)
+            pose_params.append((q_param, t_param))
+            init_quats.append(q_init.detach().clone())
+            init_trans.append(t_init.detach().clone())
+
+        # Pull the GaussianMap reference set by `maybe_run_bootstrap()`.
+        # We need it here (not via parameter) so the method signature stays
+        # side-effect-only for the caller loop.
+        gmap = self._bootstrap_gmap_ref
+        if gmap is None:
+            return {"bootstrap_skipped": "no_gaussian_map_ref", "K": K}
+
+        # Param groups: Gaussian params + pose params
+        param_groups = [
+            {"params": [gmap.means],     "lr": self.mapper.lr_config["means"]},
+            {"params": [gmap.scales],    "lr": self.mapper.lr_config["scales"]},
+            {"params": [gmap.quats],     "lr": self.mapper.lr_config["quats"]},
+            {"params": [gmap.opacities], "lr": self.mapper.lr_config["opacities"]},
+            {"params": [gmap.colors],    "lr": self.mapper.lr_config["colors"]},
+            {"params": [qp for qp, _ in pose_params], "lr": self.bootstrap_lr_quat},
+            {"params": [tp for _, tp in pose_params], "lr": self.bootstrap_lr_trans},
+        ]
+        optimizer = torch.optim.Adam(param_groups)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.bootstrap_iterations,
+            eta_min=self.mapper.lr_config["means"] * self.mapper.lr_end_factor,
+        )
+
+        # Restore gradient flow on Gaussians (tracker disables this each frame)
+        for param in gmap.parameters():
+            param.requires_grad_(True)
+
+        ds = self.mapper.render_downscale
+        final_loss = 0.0
+        for it in range(self.bootstrap_iterations):
+            optimizer.zero_grad()
+
+            # Rebuild current active poses (anchor + refined)
+            active_poses = [init_poses[0]]
+            for q_param, t_param in pose_params:
+                active_poses.append(pose_to_matrix(q_param, t_param))
+
+            iter_loss = 0.0
+            for fi, (frame, pose) in enumerate(zip(frames, active_poses)):
+                # Downsample GT to render resolution
+                if ds > 1:
+                    gt_rgb_ds = torch.nn.functional.interpolate(
+                        frame["rgb"].unsqueeze(0), scale_factor=1.0/ds,
+                        mode='bilinear', align_corners=False).squeeze(0)
+                    gt_depth_ds = torch.nn.functional.interpolate(
+                        frame["depth"].unsqueeze(0), scale_factor=1.0/ds,
+                        mode='nearest').squeeze(0)
+                else:
+                    gt_rgb_ds = frame["rgb"]
+                    gt_depth_ds = frame["depth"]
+                gt_rgb_hw = gt_rgb_ds.permute(1, 2, 0)
+                gt_depth_hw = gt_depth_ds.squeeze(0)
+
+                # Differentiable view matrix (torch.inverse, not fast_se3_inverse,
+                # because poses[1:] carry autograd from learnable params)
+                if fi > 0:
+                    viewmat = torch.inverse(pose)
+                else:
+                    viewmat = fast_se3_inverse(pose)
+
+                rendered = self.renderer(
+                    gmap, viewmat, self.K, self.width, self.height,
+                    render_lang=False, downscale=ds,
+                )
+
+                # Frame-specific dynamic mask, downsampled if needed
+                frame_mask = None
+                if masks[fi] is not None:
+                    if ds > 1:
+                        frame_mask = torch.nn.functional.interpolate(
+                            masks[fi].unsqueeze(0).unsqueeze(0),
+                            scale_factor=1.0/ds, mode='nearest',
+                        ).squeeze(0).squeeze(0)
+                    else:
+                        frame_mask = masks[fi]
+
+                loss, _ = compute_losses(
+                    rendered, gt_rgb_hw, gt_depth_hw, self.mapper.loss_weights,
+                    mask=frame_mask,
+                    use_soft_dynamic=self.mapper.use_soft_dynamic,
+                    use_hard_rgb_mask=self.mapper.use_hard_rgb_mask,
+                    reliability_thresh=self.mapper.reliability_thresh,
+                )
+                iter_loss = iter_loss + loss
+
+            iter_loss = iter_loss / len(frames)
+
+            # Pose prior (MonoGS-style, quadratic): anchor refinement near init
+            if self.bootstrap_pose_prior > 0:
+                pose_prior_loss = 0.0
+                for (q_param, t_param), q_init, t_init in zip(
+                    pose_params, init_quats, init_trans,
+                ):
+                    pose_prior_loss = pose_prior_loss + \
+                        ((t_param - t_init) ** 2).sum() + \
+                        ((q_param - q_init) ** 2).sum()
+                iter_loss = iter_loss + self.bootstrap_pose_prior * pose_prior_loss
+
+            iter_loss.backward()
+            optimizer.step()
+            scheduler.step()
+            final_loss = float(iter_loss.item())
+
+        # Build refined poses and write back
+        with torch.no_grad():
+            refined_poses = [init_poses[0]]
+            for q_param, t_param in pose_params:
+                refined_poses.append(pose_to_matrix(q_param, t_param).detach())
+
+        trans_deltas: list[float] = []
+        rot_deltas_deg: list[float] = []
+        for orig, refined in zip(init_poses, refined_poses):
+            d_t = (refined[:3, 3] - orig[:3, 3]).norm().item()
+            trans_deltas.append(d_t)
+            R_rel = refined[:3, :3] @ orig[:3, :3].T
+            cos_a = ((R_rel.trace() - 1.0) * 0.5).clamp(-1.0, 1.0)
+            rot_deltas_deg.append(float(torch.acos(cos_a).item() * 180.0 / 3.14159265))
+
+        # Write refined poses back to keyframes and per-frame estimated trajectory
+        for i, refined in enumerate(refined_poses):
+            self.keyframes[i]["pose"] = refined
+            kf_id = self.keyframes[i].get("frame_id", i)
+            if 0 <= kf_id < len(self.estimated_poses):
+                self.estimated_poses[kf_id] = refined
+
+        return {
+            "bootstrap_fired": True,
+            "K_refined": K - 1,
+            "final_loss": final_loss,
+            "pose_trans_deltas_m": trans_deltas,
+            "pose_rot_deltas_deg": rot_deltas_deg,
+            "pose_trans_max_m": max(trans_deltas) if trans_deltas else 0.0,
+            "pose_trans_mean_m": sum(trans_deltas) / len(trans_deltas) if trans_deltas else 0.0,
+        }
+
+    def maybe_run_bootstrap(self, gaussian_map: GaussianMap) -> dict | None:
+        """Public entry: fire BR1 once when conditions are met.
+
+        Call this from the driver script after each `process_frame`. Fires
+        when `bootstrap_enabled` is true, hasn't fired before, and at least
+        `bootstrap_n_frames` frames have been processed.
+        """
+        if not self.bootstrap_enabled or self._bootstrap_fired:
+            return None
+        if self.frame_count < self.bootstrap_n_frames:
+            return None
+        # Pass the gaussian_map to the refinement routine via an attribute
+        # (avoids changing the signature — the refinement loop needs direct
+        # access to the Gaussian optimizer params)
+        self._bootstrap_gmap_ref = gaussian_map
+        diag = self._run_bootstrap_refinement()
+        self._bootstrap_gmap_ref = None
+        self._bootstrap_fired = True
+        return diag
+
+    @staticmethod
+    def _umeyama_se3(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Horn/Umeyama SE(3) alignment (rotation + translation, unit scale).
+
+        Solves: argmin_{R,t} sum_i || R @ src_i + t - dst_i ||^2
+        with R in SO(3), t in R^3. Scale is fixed at 1 since RGB-D depth
+        is metric. Reference: Umeyama 1991, "Least-Squares Estimation of
+        Transformation Parameters Between Two Point Patterns".
 
         Args:
-            gt_poses: list of (4,4) ground truth poses. If None, uses stored GT.
+            src: (N, 3) source points (estimated trajectory)
+            dst: (N, 3) destination points (ground-truth trajectory)
 
         Returns:
-            ATE RMSE in meters
+            R: (3, 3) rotation
+            t: (3,)  translation
+        """
+        assert src.shape == dst.shape and src.shape[1] == 3
+        mu_src = src.mean(axis=0)
+        mu_dst = dst.mean(axis=0)
+        src_c = src - mu_src
+        dst_c = dst - mu_dst
+        # Covariance H = src_c^T @ dst_c / N  (standard Umeyama form)
+        H = src_c.T @ dst_c / src.shape[0]
+        U, _, Vt = np.linalg.svd(H)
+        # Ensure a right-handed rotation (det = +1), not a reflection
+        S = np.eye(3)
+        if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+            S[2, 2] = -1.0
+        R = Vt.T @ S @ U.T
+        t = mu_dst - R @ mu_src
+        return R, t
+
+    def compute_ate_rmse(
+        self,
+        gt_poses: list[torch.Tensor] = None,
+        align: bool = True,
+    ) -> float:
+        """Compute ATE RMSE over all processed frames.
+
+        By default performs Horn/Umeyama SE(3) trajectory alignment before
+        computing per-frame translation residuals -- the standard ATE-RMSE
+        convention used in TUM-RGBD, Replica, and BONN SLAM benchmarks
+        (Sturm et al. 2012). Set align=False for the raw frame-by-frame
+        residual (useful only when trajectories already share a world frame
+        and the user explicitly wants to measure that).
+
+        Args:
+            gt_poses: list of (4,4) ground-truth poses. If None, returns -1.
+            align: if True (default), apply Umeyama SE(3) alignment first.
+
+        Returns:
+            ATE RMSE in meters.
         """
         if gt_poses is None or len(self.estimated_poses) == 0:
             return -1.0
 
         n = min(len(self.estimated_poses), len(gt_poses))
-        errors = []
-        for i in range(n):
-            est_t = self.estimated_poses[i][:3, 3]
-            gt_t = gt_poses[i][:3, 3].to(self.device)
-            errors.append(torch.norm(est_t - gt_t).item())
+        if n < 3 and align:
+            # Not enough points for a meaningful alignment; fall back to raw.
+            align = False
 
-        errors = np.array(errors)
+        est_t = np.stack([
+            self.estimated_poses[i][:3, 3].detach().cpu().numpy()
+            for i in range(n)
+        ], axis=0)  # (N, 3)
+        gt_t = np.stack([
+            gt_poses[i][:3, 3].detach().cpu().numpy() if torch.is_tensor(gt_poses[i])
+            else np.asarray(gt_poses[i])[:3, 3]
+            for i in range(n)
+        ], axis=0)  # (N, 3)
+
+        if align:
+            R, t = self._umeyama_se3(est_t, gt_t)
+            est_aligned = (R @ est_t.T).T + t
+            errors = np.linalg.norm(est_aligned - gt_t, axis=1)
+        else:
+            errors = np.linalg.norm(est_t - gt_t, axis=1)
+
         return float(np.sqrt(np.mean(errors ** 2)))
 
     def query_3d(
