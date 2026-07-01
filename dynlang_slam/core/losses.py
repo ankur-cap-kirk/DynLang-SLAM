@@ -31,12 +31,16 @@ def huber_loss(
 def ssim_loss(
     pred: torch.Tensor, target: torch.Tensor,
     window_size: int = 11, C1: float = 0.01**2, C2: float = 0.03**2,
+    mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """Structural Similarity Index loss (1 - SSIM).
 
     Args:
         pred: (H, W, C) or (1, C, H, W) predicted image
         target: same shape as pred
+        mask: optional (H, W) float, 1=valid, 0=ignore. SSIM is averaged
+            over valid pixels only, so dynamic regions the map deliberately
+            does not model cannot pull the pose.
 
     Returns:
         Scalar loss (1 - SSIM), lower is better
@@ -63,6 +67,9 @@ def ssim_loss(
     ssim_map = ((2 * mu12 + C1) * (2 * sigma12 + C2)) / \
                ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
+    if mask is not None:
+        m = mask.unsqueeze(0).unsqueeze(0).expand_as(ssim_map)  # (1, C, H, W)
+        return 1.0 - (ssim_map * m).sum() / (m.sum() + 1e-8)
     return 1.0 - ssim_map.mean()
 
 
@@ -228,8 +235,11 @@ def compute_losses(
     else:
         loss_depth = l1_loss(pred_depth, gt_depth, depth_valid)
 
-    # SSIM loss
-    loss_ssim = ssim_loss(pred_rgb, gt_rgb)
+    # SSIM loss. Masked by the dynamic mask only (not the alpha gate), so
+    # behavior is unchanged for static scenes: previously SSIM was computed
+    # over the whole image, letting unmodeled dynamic objects pull the pose
+    # even when RGB/depth terms were correctly masked.
+    loss_ssim = ssim_loss(pred_rgb, gt_rgb, mask=mask)
 
     # Weighted total
     total = (

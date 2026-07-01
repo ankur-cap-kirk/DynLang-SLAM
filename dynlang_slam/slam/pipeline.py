@@ -102,7 +102,7 @@ class SLAMPipeline:
         self.keyframe_every_n = cfg.slam.keyframe.every_n_frames
         self.max_keyframes = cfg.slam.keyframe.max_keyframes
         self.keyframes: list[dict] = []  # list of {frame, pose}
-        self.keyframe_window_size = 5  # recent keyframes used for mapping
+        self.keyframe_window_size = int(getattr(cfg.slam.keyframe, "window_size", 5))
 
         # State
         self.estimated_poses: list[torch.Tensor] = []
@@ -222,6 +222,67 @@ class SLAMPipeline:
         )
         self._dynamic_initialized = True
         print("  Dynamic detector ready.", flush=True)
+
+    def _build_raw_dynamic_mask(
+        self, rgb: torch.Tensor, depth: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-instance dynamic mask with instance-level depth verification.
+
+        Replaces the old per-pixel depth-verify (FIX 6), which erased the
+        interior of laterally-moving objects: a walking person's torso keeps
+        near-constant depth frame-to-frame, so pixel-wise depth differencing
+        un-flagged the whole body and left only silhouette edges (~2-3%
+        coverage on BONN person_tracking vs the person's actual 10-20%).
+
+        Decisions are now all-or-nothing per YOLO instance:
+          * classes in `always_dynamic_classes` (default: person) are kept
+            unconditionally — they are dynamic a priori;
+          * other classes are kept only if enough of their pixels show real
+            depth motion (the original intent of FIX 6: drop parked cars and
+            mislabeled furniture, not people).
+
+        Returns:
+            raw_union: (H, W) bool — union of all detections (pre-verification)
+            verified:  (H, W) bool — union of detections that passed verification
+        """
+        detections = self._dynamic_detector.detect(rgb)
+
+        H, W = self.height, self.width
+        raw_union = torch.zeros(H, W, dtype=torch.bool, device=self.device)
+        verified = torch.zeros(H, W, dtype=torch.bool, device=self.device)
+        if not detections:
+            return raw_union, verified
+
+        always_dynamic = set(
+            getattr(self.cfg.dynamic, 'always_dynamic_classes', [0])
+        )
+        depth_verify_thresh = getattr(self.cfg.dynamic, 'depth_verify_thresh', 0.05)
+        min_moving_frac = float(
+            getattr(self.cfg.dynamic, 'instance_moving_frac', 0.2)
+        )
+
+        # Relative frame-to-frame depth change. Confounded by camera motion
+        # (prev depth is not warped into the current view), so it is only
+        # used as aggregate instance-level evidence, never per pixel.
+        rel_diff = None
+        if self._prev_depth is not None:
+            cur_depth_hw = depth.squeeze(0)
+            depth_diff = (cur_depth_hw - self._prev_depth).abs()
+            rel_diff = depth_diff / cur_depth_hw.clamp(min=0.1)
+
+        for det in detections:
+            mask = det["mask"].to(self.device)
+            if not mask.any():
+                continue
+            raw_union |= mask
+            if det["class_id"] in always_dynamic or rel_diff is None:
+                verified |= mask
+                continue
+            moving_frac = (rel_diff[mask] > depth_verify_thresh).float().mean().item()
+            if moving_frac >= min_moving_frac:
+                verified |= mask
+
+        return raw_union, verified
 
     def process_first_frame(
         self,
@@ -357,29 +418,35 @@ class SLAMPipeline:
         subsample = flat_feats[::8]
         self._autoencoder.add_features(subsample)
 
-        # Train autoencoder during warmup
+        # Train autoencoder during warmup. Bumped num_steps 50->200 since
+        # with warmup_frames=20 we only get a handful of training calls; need
+        # more gradient passes per call to converge on the limited data.
         if not self._autoencoder.is_frozen:
             if self._autoencoder.buffer_size >= 512:
-                ae_info = self._autoencoder.train_step(batch_size=512, num_steps=50)
-                if frame_id % 50 == 0:
+                ae_info = self._autoencoder.train_step(batch_size=512, num_steps=200)
+                if frame_id % 10 == 0:
                     print(f"  AE train: loss={ae_info['total']:.4f} "
                           f"(l1={ae_info['l1']:.4f}, cos={ae_info['cosine']:.4f}) "
                           f"buf={ae_info['buffer_size']}", flush=True)
 
                 # Freeze when BOTH conditions met:
                 # 1. Minimum frames processed (enough scene coverage)
-                # 2. Cosine reconstruction is good enough (> 0.85 = 1-0.15)
+                # 2. Cosine reconstruction is good enough.
+                # Threshold lowered 0.85 -> 0.70 to actually converge on
+                # short SLAM runs (the wider latent_dim=128 makes 0.85 hard
+                # to hit anyway -- more dims to align).
                 cosine_quality = 1.0 - ae_info.get("cosine", 1.0)
                 past_warmup = self.frame_count >= self.lang_warmup_frames
-                converged = cosine_quality > 0.85 and ae_info["total"] < 0.5
+                converged = cosine_quality > 0.70 and ae_info["total"] < 0.7
 
                 if past_warmup and converged:
                     self._autoencoder.freeze()
                     print(f"  Autoencoder frozen at frame {self.frame_count} "
                           f"(steps={self._autoencoder._train_steps}, "
                           f"cos_quality={cosine_quality:.3f})", flush=True)
-                elif self.frame_count >= self.lang_warmup_frames * 3:
-                    # Hard cap: freeze anyway after 3x warmup to avoid training forever
+                elif self.frame_count >= self.lang_warmup_frames * 2:
+                    # Hard cap: freeze anyway at 2x warmup to give lang loss
+                    # a chance to actually run on short BONN sequences.
                     self._autoencoder.freeze()
                     print(f"  Autoencoder force-frozen at frame {self.frame_count} "
                           f"(steps={self._autoencoder._train_steps}, "
@@ -618,24 +685,11 @@ class SLAMPipeline:
         dynamic_mask = None  # None = no masking (all pixels used)
         if self.dynamic_enabled:
             self._init_dynamic_pipeline()
-            # Raw YOLO output: bool (H, W), True = detected dynamic class
-            raw_dynamic = self._dynamic_detector.detect_and_merge(rgb)
-            raw_dynamic = raw_dynamic.to(self.device)
-
-            # FIX 6: Depth-verify BEFORE temporal filter.
-            # Removes stationary YOLO detections (e.g. sitting person, furniture
-            # mislabeled) by requiring the flagged pixel to have actually moved
-            # in depth compared to the previous frame.
-            depth_verify_thresh = getattr(self.cfg.dynamic, 'depth_verify_thresh', 0.05)
-            if self._prev_depth is not None and raw_dynamic.any():
-                cur_depth_hw = depth.squeeze(0)      # (H, W)
-                prev_depth_hw = self._prev_depth      # (H, W)
-                depth_diff = (cur_depth_hw - prev_depth_hw).abs()
-                mean_depth = cur_depth_hw.clamp(min=0.1)
-                relative_diff = depth_diff / mean_depth
-                # Pixels flagged dynamic but with no depth change -> un-flag them
-                not_moving = relative_diff < depth_verify_thresh
-                raw_dynamic = raw_dynamic & ~not_moving
+            # Instance-level detection + verification (see _build_raw_dynamic_mask)
+            raw_union, raw_dynamic = self._build_raw_dynamic_mask(rgb, depth)
+            n_px = self.height * self.width
+            info["mask_pct_yolo"] = raw_union.sum().item() / n_px * 100
+            info["mask_pct_verified"] = raw_dynamic.sum().item() / n_px * 100
 
             # Temporal filter expects CPU bool and returns (H, W) float (1=static, 0=dynamic)
             dynamic_mask = self._temporal_filter.update(raw_dynamic.cpu())
@@ -777,6 +831,7 @@ class SLAMPipeline:
                     viewmat, self.K, self.width, self.height, dynamic_mask,
                     increase=getattr(self.cfg.dynamic, 'belief_increase', 0.3),
                     decay=getattr(self.cfg.dynamic, 'belief_decay', 0.05),
+                    depth=depth.squeeze(0),
                 )
 
         # --- KEYFRAME CHECK ---
@@ -846,9 +901,11 @@ class SLAMPipeline:
                 # AND autoencoder is frozen (don't hurt geometry with bad early targets)
                 if any(m is not None for m in lang_maps_for_window):
                     if self._autoencoder.is_frozen:
-                        # Ramp up over 50 frames after freeze
+                        # Ramp up over 15 frames after freeze (was 50 -- too
+                        # slow for short BONN sequences where lang loss
+                        # never reached full strength)
                         frames_since_freeze = max(0, self.frame_count - self.lang_warmup_frames)
-                        ramp = min(1.0, frames_since_freeze / 50.0)
+                        ramp = min(1.0, frames_since_freeze / 15.0)
                         effective_lang_weight = self.lang_weight * ramp
                     else:
                         effective_lang_weight = 0.0  # no lang loss during AE warmup

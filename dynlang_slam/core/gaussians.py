@@ -385,6 +385,8 @@ class GaussianMap(nn.Module):
         mask: torch.Tensor,
         increase: float = 0.2,
         decay: float = 0.07,
+        depth: torch.Tensor = None,
+        depth_margin: float = 0.15,
     ) -> None:
         """Update per-Gaussian dynamic belief using the current frame's mask.
 
@@ -398,6 +400,13 @@ class GaussianMap(nn.Module):
             mask: (H, W) float, 1=static, 0=dynamic
             increase: belief increment for Gaussians in dynamic regions
             decay: belief decay per frame for all Gaussians
+            depth: optional (H, W) observed depth in meters. When given, only
+                Gaussians at or in front of the observed surface are flagged;
+                static background occluded BEHIND a dynamic object (z >
+                observed + depth_margin) is left alone. Without this test,
+                a person walking across the scene bumps belief on every wall
+                and floor Gaussian they pass in front of.
+            depth_margin: slack in meters for the occlusion test
         """
         if self._num_gaussians == 0:
             return
@@ -423,6 +432,14 @@ class GaussianMap(nn.Module):
 
             mask_dev = mask.to(self.device) if mask.device != self.device else mask
             is_dynamic = mask_dev[v[valid], u[valid]] < 0.5
+
+            # Occlusion test: don't flag static background behind the object
+            if depth is not None:
+                depth_dev = depth.to(self.device) if depth.device != self.device else depth
+                d_obs = depth_dev[v[valid], u[valid]]
+                behind = (d_obs > 0) & (z[valid] > d_obs + depth_margin)
+                is_dynamic = is_dynamic & ~behind
+
             dyn_indices = torch.where(valid)[0][is_dynamic]
 
             if dyn_indices.shape[0] > 0:
@@ -496,6 +513,8 @@ class GaussianMap(nn.Module):
         width: int,
         height: int,
         mask: torch.Tensor,
+        depth: torch.Tensor = None,
+        depth_margin: float = 0.15,
     ) -> int:
         """Increment contamination count for Gaussians projecting into dynamic pixels.
 
@@ -507,6 +526,12 @@ class GaussianMap(nn.Module):
             K: (3, 3) camera intrinsics
             width, height: image dimensions
             mask: (H, W) float — 1=static, 0=dynamic
+            depth: optional (H, W) observed depth in meters. When given, only
+                Gaussians at or in front of the observed surface are counted;
+                occluded static background (z > observed + depth_margin) is
+                spared. Without it, cleanup deletes the wall/floor everywhere
+                the dynamic object has passed in front.
+            depth_margin: slack in meters for the occlusion test
 
         Returns:
             Number of Gaussians marked as contaminated
@@ -538,6 +563,14 @@ class GaussianMap(nn.Module):
             # Check which valid Gaussians project into dynamic regions
             mask_dev = mask.to(self.device) if mask.device != self.device else mask
             is_dynamic = mask_dev[v_valid, u_valid] < 0.5
+
+            # Occlusion test: don't count static background behind the object
+            if depth is not None:
+                depth_dev = depth.to(self.device) if depth.device != self.device else depth
+                d_obs = depth_dev[v_valid, u_valid]
+                behind = (d_obs > 0) & (z[valid] > d_obs + depth_margin)
+                is_dynamic = is_dynamic & ~behind
+
             contaminated_indices = torch.where(valid)[0][is_dynamic]
 
             n_contaminated = contaminated_indices.shape[0]

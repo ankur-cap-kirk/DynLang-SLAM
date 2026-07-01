@@ -308,6 +308,7 @@ class Mapper:
                     viewmat = fast_se3_inverse(pose)
                     gaussian_map.mark_contaminated(
                         viewmat, K, width, height, masks[fi],
+                        depth=frame["depth"].squeeze(0),
                     )
 
         # Densify based on position gradients + rendering error (HF-SLAM style)

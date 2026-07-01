@@ -98,7 +98,10 @@ def run_slam(dynamic_enabled: bool) -> dict:
         dynamic_pcts.append(dyn_pct)
 
         if i % 10 == 0 or i == len(dataset) - 1:
-            dyn_str = f" | dyn={dyn_pct:.1f}%" if dynamic_enabled else ""
+            dyn_str = ""
+            if dynamic_enabled:
+                dyn_str = (f" | yolo={info.get('mask_pct_yolo', 0.0):.1f}%"
+                           f" -> dyn={dyn_pct:.1f}%")
             gauss_str = f" | G={info['total_gaussians']}"
             clean_str = ""
             if "contamination_cleaned" in info:
