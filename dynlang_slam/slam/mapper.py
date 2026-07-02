@@ -121,9 +121,13 @@ class Mapper:
         if add_new:
             for fi, (frame, pose) in enumerate(zip(frames, poses)):
                 frame_mask = masks[fi] if masks is not None and fi < len(masks) else None
+                frame_lang = None
+                if lang_feature_maps is not None and fi < len(lang_feature_maps):
+                    frame_lang = lang_feature_maps[fi]
                 n_added = self._expand_map(
                     gaussian_map, frame, pose, K, width, height, fx, fy, cx, cy,
                     mask=frame_mask,
+                    lang_map=frame_lang,
                 )
                 total_added += n_added
 
@@ -394,10 +398,16 @@ class Mapper:
         height: int,
         fx: float, fy: float, cx: float, cy: float,
         mask: torch.Tensor = None,
+        lang_map: torch.Tensor = None,
     ) -> int:
         """Add new Gaussians for regions not covered by existing map.
 
         Uses silhouette rendering: pixels with low alpha need new Gaussians.
+
+        When `lang_map` (H, W, lang_feat_dim) is given, each new Gaussian is
+        seeded with the compressed language feature observed at its source
+        pixel, so queries work immediately instead of waiting on the rendered
+        language loss to (never) pull features off their zero init.
         """
         with torch.no_grad():
             viewmat = torch.inverse(pose)
@@ -455,7 +465,16 @@ class Mapper:
             new_means = points_cam @ R.T + t.unsqueeze(0)
             new_colors = rgb_ds[unmapped_ds]  # (M, 3)
 
-            return gaussian_map.add_gaussians(new_means, new_colors)
+            # Seed language features from the same source pixels (skip
+            # all-zero placeholder maps the pipeline inserts for keyframes
+            # without an extraction)
+            new_lang = None
+            if lang_map is not None and lang_map.abs().sum() > 0:
+                lang_ds = lang_map.to(depth.device)[::downsample, ::downsample]
+                new_lang = lang_ds[unmapped_ds]  # (M, lang_feat_dim)
+
+            return gaussian_map.add_gaussians(new_means, new_colors,
+                                              new_lang=new_lang)
 
     def _prune_gaussians(self, gaussian_map: GaussianMap, min_opacity: float = 0.005) -> int:
         """Remove Gaussians with very low opacity."""

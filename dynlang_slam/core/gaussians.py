@@ -164,6 +164,7 @@ class GaussianMap(nn.Module):
         new_means: torch.Tensor,
         new_colors: torch.Tensor,
         new_scales: torch.Tensor = None,
+        new_lang: torch.Tensor = None,
     ) -> int:
         """Add new Gaussians for newly observed regions.
 
@@ -171,6 +172,11 @@ class GaussianMap(nn.Module):
             new_means: (M, 3) positions
             new_colors: (M, 3) RGB colors
             new_scales: optional (M, 3) log-space scales. If None, uses default.
+            new_lang: optional (M, lang_feat_dim) compressed language features
+                observed at each Gaussian's source pixel. If None, features
+                start at zero and must be learned via the rendered language
+                loss alone — which is far too weak to move them off zero on
+                short sequences (observed norms <= 0.43 after full runs).
 
         Returns:
             Number of Gaussians added
@@ -202,7 +208,10 @@ class GaussianMap(nn.Module):
             new_color_params[:, self.n_sh_coeffs] = dc[:, 1]
             new_color_params[:, 2 * self.n_sh_coeffs] = dc[:, 2]
 
-        new_lang = torch.zeros(M, self.lang_feat_dim, device=device)
+        if new_lang is None:
+            new_lang = torch.zeros(M, self.lang_feat_dim, device=device)
+        else:
+            new_lang = new_lang.to(device)
 
         # Concatenate with existing
         self.means = nn.Parameter(torch.cat([self.means.data, new_means.to(device)]))

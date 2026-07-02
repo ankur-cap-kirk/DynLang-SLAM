@@ -1259,6 +1259,7 @@ class SLAMPipeline:
         text: str,
         top_k: int = 100,
         use_relevancy: bool = True,
+        min_feat_norm: float = 0.1,
     ) -> dict:
         """Query the 3D Gaussian map with a text string.
 
@@ -1270,6 +1271,10 @@ class SLAMPipeline:
             text: text query (e.g., "chair", "red object")
             top_k: number of top-matching Gaussians to return
             use_relevancy: if True, use LangSplat contrastive relevancy (sharper)
+            min_feat_norm: Gaussians whose lang_feats norm is below this are
+                excluded from scoring. Near-zero features (never supervised /
+                never seeded) normalize into noise that matches every query,
+                which is what caused the all-queries-relevancy-1.0 saturation.
 
         Returns:
             dict with 'scores' (N,), 'top_k_indices' (K,),
@@ -1288,6 +1293,8 @@ class SLAMPipeline:
 
         with torch.no_grad():
             lang_feats = gaussian_map.lang_feats.data  # (N, latent_dim)
+            feat_norms = lang_feats.norm(dim=-1)  # (N,)
+            valid = feat_norms > min_feat_norm
             lang_norm = torch.nn.functional.normalize(lang_feats, dim=-1)
             query_norm = torch.nn.functional.normalize(text_feat_latent.unsqueeze(0), dim=-1)
             sim_query = (lang_norm @ query_norm.T).squeeze(-1)  # (N,)
@@ -1309,6 +1316,10 @@ class SLAMPipeline:
             else:
                 scores = sim_query
 
+            # Exclude never-supervised (near-zero-norm) features from ranking
+            if valid.any():
+                scores = scores.masked_fill(~valid, -1.0)
+                top_k = min(top_k, int(valid.sum().item()))
             top_k = min(top_k, scores.shape[0])
             top_scores, top_indices = scores.topk(top_k)
             top_positions = gaussian_map.means.data[top_indices]
@@ -1324,4 +1335,6 @@ class SLAMPipeline:
             "top_k_positions": top_positions,
             "top_k_scores": top_scores,
             "query_text": text,
+            "n_valid_feats": int(valid.sum().item()),
+            "n_gaussians": int(valid.shape[0]),
         }
