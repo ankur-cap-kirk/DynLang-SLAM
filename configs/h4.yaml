@@ -1,0 +1,166 @@
+# DynLang-SLAM H4 Configuration
+#
+# H4 is the in-the-wild Pixel 8 capture (PXL_20260501_222309116.mp4):
+# 4K portrait video, outdoor campus walking, 6 min 10 s at 60 fps. The
+# raw video is preprocessed by scripts/prepare_h4.py into three clips
+# in data/H4/clip_{a,b,c}/, each in TUM-format directory layout with
+# DepthAnything-V2 (outdoor metric) depth in place of sensor depth and
+# no groundtruth.txt (no GT poses available).
+#
+# Differences vs configs/default.yaml are flagged with [H4] comments
+# and explained briefly inline.
+
+# Dataset
+dataset:
+  type: "h4"                        # [H4] new type; loader uses TUMDataset(has_gt=False)
+  path: "./data/H4"                 # [H4] base; the running script appends clip_a/b/c
+  scene: "clip_a"                   # [H4] default clip; override via CLI
+  image_height: 854                 # [H4] portrait long axis
+  image_width: 480                  # [H4] portrait short axis
+  depth_scale: 5000.0
+  max_frames: -1
+  has_gt: false                     # [H4] no GT trajectory; ATE numbers meaningless on H4
+
+# Camera (Pixel 8 main camera at 480x854 portrait, central principal point).
+# These values are the fallback if scripts/prepare_h4.py was unable to
+# write a per-clip intrinsics.txt; the loader reads intrinsics.txt
+# preferentially when present.
+camera:
+  fx: 479.0                         # [H4] f_full(2156) / 4.5 downsample
+  fy: 479.0                         # [H4] same (square pixels in sensor space)
+  cx: 240.0                         # [H4] image centre (width/2)
+  cy: 427.0                         # [H4] image centre (height/2)
+
+# 3D Gaussian Splatting
+gaussians:
+  sh_degree: 0
+  lang_feat_dim: 16
+  init_opacity: 0.5
+  min_opacity: 0.005
+  max_gaussians: 1000000
+  densify_grad_thresh: 0.0002
+  densify_interval: 10
+  densify_max_scale: 0.05
+  prune_interval: 100
+  opacity_reset_interval: 3000
+  max_screen_size: 20
+
+# SLAM
+slam:
+  render_downscale: 1
+
+  # Tracking
+  tracking:
+    iterations: 80                  # [H4] +60% over default 50; absorbs walking shake / motion blur
+    lr_pose: 0.002
+    lr_end_factor: 0.05
+    use_depth: true
+    depth_weight: 1.0
+    coarse_to_fine: false
+    coarse_downscale: 2
+    coarse_ratio: 0.4
+    use_velocity_init: true
+    early_stop_patience: 12         # [H4] +50% patience; loss noise is higher on monocular depth
+    early_stop_rel_thresh: 0.001
+
+  # Mapping
+  mapping:
+    iterations: 40                  # [H4] reduced from 60 to fit 8 GB VRAM at 480x854
+    lr_means: 0.0001
+    lr_scales: 0.005
+    lr_quats: 0.001
+    lr_opacities: 0.05
+    lr_colors: 0.0025
+    lr_lang_feats: 0.001
+    lr_end_factor: 0.3
+    new_gaussian_thresh: 0.5
+
+  # Keyframe selection
+  keyframe:
+    every_n_frames: 5
+    max_keyframes: 200
+    overlap_thresh: 0.95
+    kf_trans_thresh: 0.05
+    kf_rot_thresh: 0.087
+    kf_min_interval: 2
+    kf_max_interval: 15
+    window_size: 3                  # [H4] reduced from 5: at 480x854 with language
+                                    # gradients enabled, a 5-KF sliding window OOMs
+                                    # an 8 GB GPU during mapper backward.
+
+# Loss weights
+loss:
+  rgb_weight: 0.5
+  depth_weight: 0.6                 # [H4] reduced from 1.2: monocular depth is noisier than Kinect,
+                                    # so we trust photometric more relative to depth
+  ssim_weight: 0.2
+  lang_weight: 0.1
+
+# Language features
+language:
+  enabled: true
+  clip_model: "ViT-L-14"
+  clip_pretrained: "openai"
+  extract_every_n: 5
+  use_sam: true
+  sam_model: "sam2.1_hiera_t"
+  sam_checkpoint: "checkpoints/sam2.1_hiera_tiny.pt"
+  scales: ["whole"]
+  autoencoder:
+    input_dim: 768
+    hidden_dim: 256
+    latent_dim: 16
+    lr: 0.001
+    warmup_frames: 30               # [H4] +50% over default 20; outdoor visual diversity needs
+                                    # more frames before AE cosine reconstruction crosses 0.70
+
+# Dynamic object handling
+dynamic:
+  enabled: true
+  detector: "yolov8"
+  yolo_model: "yolov8x-seg"
+  confidence_thresh: 0.5
+  # Outdoor walking: add bus(5)+truck(7) on top of default indoor classes.
+  # COCO IDs: 0=person 1=bicycle 2=car 3=motorcycle 5=bus 7=truck
+  #           14=bird 15=cat 16=dog 17=horse
+  dynamic_classes: [0, 1, 2, 3, 5, 7, 14, 15, 16, 17]    # [H4] +bus +truck
+  temporal_window: 3
+  min_detections: 2
+  mask_dilation_kernel: 5
+  depth_verify_thresh: 0.05
+  use_soft_weights: true
+  use_bayesian_belief: true
+  belief_increase: 0.2
+  belief_decay: 0.07
+  cleanup_every_n: 20
+  contamination_thresh: 3
+  # [H4] PIPs/CoTracker is DISABLED for outdoor walking video. CoTracker2
+  # tracks raw 2D pixel motion across frames; with a moving camera (the
+  # user is walking) every point in the scene moves >25 px in the 8-frame
+  # window just from ego-motion, so the PIPs mask fires on 60-70% of pixels
+  # and corrupts both the per-Gaussian belief field and the photometric
+  # loss. PIPs was designed for tripod-style indoor sequences (BONN) and
+  # cannot tell ego-motion from object motion without a separate
+  # camera-motion-compensation stage we don't have. Re-enable only if you
+  # add such a stage.
+  pips:
+    enabled: false
+    window_size: 8
+    grid: 20
+    thresh_px: 25.0
+    dilation_kernel: 15
+
+# Training
+training:
+  seed: 42
+  device: "cuda"
+  mixed_precision: true
+
+# Logging
+logging:
+  log_dir: "./results/h4"           # [H4] separate from results/ to avoid clobbering H1-3
+  save_checkpoints: true
+  checkpoint_interval: 500
+  log_interval: 10
+  visualize: true
+  viz_interval: 50

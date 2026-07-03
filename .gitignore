@@ -49,3 +49,8 @@ reply_*.md
 # Personal class-discussion screenshots (never publish)
 report/my_post.png
 report/reply_*.png
+
+# Course materials (local only)
+report/midterm*
+*.pptx
+report/intro_litreview/
