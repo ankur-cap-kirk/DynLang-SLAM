@@ -1274,11 +1274,13 @@ class SLAMPipeline:
         top_k: int = 100,
         use_relevancy: bool = True,
         min_feat_norm: float = 0.1,
+        use_decoder_route: bool = True,
     ) -> dict:
         """Query the 3D Gaussian map with a text string.
 
-        Encodes text through CLIP -> autoencoder, then computes relevancy
-        score (contrastive vs canonical phrases) against all Gaussians.
+        Default (decoder route): decodes per-Gaussian latents back to CLIP
+        space and compares with raw CLIP text (templated prompt). Set
+        use_decoder_route=False for the legacy encoder-latent comparison.
 
         Args:
             gaussian_map: Gaussian map with trained lang_feats
@@ -1301,25 +1303,44 @@ class SLAMPipeline:
         self._clip_extractor.model.to(self.device)
         self._clip_extractor.device = self.device
 
-        # Text -> CLIP 768-dim -> autoencoder latent
-        text_feat_clip = self._clip_extractor.encode_text(text)  # (768,)
-        text_feat_latent = self._autoencoder.encode(text_feat_clip.unsqueeze(0).to(self.device)).squeeze(0)
-
         with torch.no_grad():
             lang_feats = gaussian_map.lang_feats.data  # (N, latent_dim)
             feat_norms = lang_feats.norm(dim=-1)  # (N,)
             valid = feat_norms > min_feat_norm
-            lang_norm = torch.nn.functional.normalize(lang_feats, dim=-1)
-            query_norm = torch.nn.functional.normalize(text_feat_latent.unsqueeze(0), dim=-1)
-            sim_query = (lang_norm @ query_norm.T).squeeze(-1)  # (N,)
+
+            canonical = ["object", "things", "stuff", "texture"]
+            if use_decoder_route:
+                # Decoder route: decode Gaussian latents back to CLIP space
+                # and compare against RAW CLIP text there. Avoids pushing
+                # text through the image-trained encoder — doubled zero-shot
+                # mIoU on Replica room0 (0.029 -> 0.066 with templates).
+                prompt = f"a photo of a {text} in a room"
+                text_feat = self._clip_extractor.encode_text(prompt).to(self.device)
+                gauss_vecs = torch.nn.functional.normalize(
+                    self._autoencoder.decode(lang_feats), dim=-1)  # (N, 768)
+                query_norm = torch.nn.functional.normalize(
+                    text_feat.unsqueeze(0), dim=-1)
+                canon_vecs = torch.nn.functional.normalize(
+                    self._clip_extractor.encode_texts(canonical).to(self.device),
+                    dim=-1)
+            else:
+                # Legacy: text through the image-trained encoder, compare in
+                # 16-D latent space.
+                text_feat_clip = self._clip_extractor.encode_text(text)
+                text_feat_latent = self._autoencoder.encode(
+                    text_feat_clip.unsqueeze(0).to(self.device)).squeeze(0)
+                gauss_vecs = torch.nn.functional.normalize(lang_feats, dim=-1)
+                query_norm = torch.nn.functional.normalize(
+                    text_feat_latent.unsqueeze(0), dim=-1)
+                canon_clips = self._clip_extractor.encode_texts(canonical).to(self.device)
+                canon_vecs = torch.nn.functional.normalize(
+                    self._autoencoder.encode(canon_clips), dim=-1)
+
+            sim_query = (gauss_vecs @ query_norm.T).squeeze(-1)  # (N,)
 
             if use_relevancy:
                 # Contrastive relevancy against canonical phrases
-                canonical = ["object", "things", "stuff", "texture"]
-                canon_clips = self._clip_extractor.encode_texts(canonical).to(self.device)  # (C, 768)
-                canon_latents = self._autoencoder.encode(canon_clips)  # (C, latent_dim)
-                canon_norm = torch.nn.functional.normalize(canon_latents, dim=-1)
-                sim_canons = lang_norm @ canon_norm.T  # (N, C)
+                sim_canons = gauss_vecs @ canon_vecs.T  # (N, C)
                 max_canon = sim_canons.max(dim=-1).values  # (N,)
 
                 # Temperature scaling (must match feature_map.py compute_relevancy)
