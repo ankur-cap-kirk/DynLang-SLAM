@@ -456,6 +456,49 @@ class GaussianMap(nn.Module):
                     self.dynamic_belief[dyn_indices] + increase
                 ).clamp(max=1.0)
 
+    def render_belief_mask(
+        self,
+        viewmat: torch.Tensor,
+        K: torch.Tensor,
+        width: int,
+        height: int,
+        belief_thresh: float = 0.5,
+        dilation: int = 15,
+    ) -> torch.Tensor:
+        """Project high-dynamic-belief Gaussians into a view as a mask.
+
+        The language prior deposits evidence into `dynamic_belief` sparsely
+        (extraction keyframes); this reprojection carries that evidence to
+        EVERY frame as a dense dynamic mask at the cost of one point
+        projection. Returns (H, W) bool, True = dynamic.
+        """
+        mask = torch.zeros(height, width, dtype=torch.bool, device=self.device)
+        if self._num_gaussians == 0:
+            return mask
+        with torch.no_grad():
+            hot = self.dynamic_belief > belief_thresh
+            if not hot.any():
+                return mask
+            means = self.means.data[hot]
+            R = viewmat[:3, :3]
+            t = viewmat[:3, 3]
+            means_cam = means @ R.T + t.unsqueeze(0)
+            z = means_cam[:, 2]
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            u = (means_cam[:, 0] * fx / z + cx).long()
+            v = (means_cam[:, 1] * fy / z + cy).long()
+            valid = (z > 0.01) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+            if not valid.any():
+                return mask
+            mask[v[valid], u[valid]] = True
+            if dilation > 1:
+                m = mask.float().unsqueeze(0).unsqueeze(0)
+                m = torch.nn.functional.max_pool2d(
+                    m, kernel_size=dilation, stride=1, padding=dilation // 2)
+                mask = m.squeeze(0).squeeze(0) > 0.5
+        return mask
+
     def seed_lang_feats_from_map(
         self,
         viewmat: torch.Tensor,

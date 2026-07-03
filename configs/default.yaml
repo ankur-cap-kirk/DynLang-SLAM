@@ -196,6 +196,25 @@ dynamic:
   # Contamination cleanup
   cleanup_every_n: 20  # frames between cleanup passes
   contamination_thresh: 3  # min frames a gaussian must be contaminated
+  # LP1: language-driven open-vocabulary dynamic prior.
+  # Scores the per-pixel CLIP feature map (built during language extraction)
+  # against a TEXT-defined dynamic vocabulary; matching pixels join the
+  # dynamic mask and deposit per-Gaussian belief, which reprojects into
+  # every frame as a dense mask. Makes the dynamic vocabulary runtime-
+  # configurable instead of YOLO's closed COCO list.
+  # Protocol: research/experiments/language-prior/protocol.md
+  language_prior:
+    enabled: false          # off until LP1 evaluation passes
+    prompts:
+      - "a person"
+      - "an animal or pet"
+      - "a balloon or floating object"
+      - "an object being moved or carried"
+    relevancy_thresh: 0.6   # per-pixel contrastive relevancy cutoff
+    belief_increase: 0.5    # belief deposit for language-flagged Gaussians
+    belief_mask_thresh: 0.5 # belief above this reprojects as dynamic
+    dilation: 15            # px dilation of the reprojection mask
+
   # Class-agnostic dynamic mask via CoTracker2 (PIPs lineage, Lec 27).
   # Tracks a grid of query points through a sliding window and flags any
   # point whose observed trajectory disagrees with the rigid-motion

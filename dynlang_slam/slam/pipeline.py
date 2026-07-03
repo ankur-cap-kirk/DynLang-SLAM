@@ -124,6 +124,29 @@ class SLAMPipeline:
         # Cache: keyframe_id -> compressed feature map (H, W, latent_dim)
         self._lang_cache: dict[int, torch.Tensor] = {}
 
+        # LP1 language-driven dynamic prior (see
+        # research/experiments/language-prior/protocol.md)
+        lp_cfg = getattr(cfg.dynamic, 'language_prior', None)
+        self.lang_prior_enabled = bool(
+            lp_cfg and getattr(lp_cfg, 'enabled', False)
+            and getattr(cfg.language, 'enabled', False)
+            and getattr(cfg.dynamic, 'enabled', False)
+        )
+        self.lang_prior_prompts = list(getattr(lp_cfg, 'prompts', [
+            "a person", "an animal or pet", "a balloon or floating object",
+            "an object being moved or carried",
+        ])) if lp_cfg else []
+        self.lang_prior_thresh = float(
+            getattr(lp_cfg, 'relevancy_thresh', 0.6)) if lp_cfg else 0.6
+        self.lang_prior_belief_increase = float(
+            getattr(lp_cfg, 'belief_increase', 0.5)) if lp_cfg else 0.5
+        self.lang_prior_belief_mask_thresh = float(
+            getattr(lp_cfg, 'belief_mask_thresh', 0.5)) if lp_cfg else 0.5
+        self.lang_prior_dilation = int(
+            getattr(lp_cfg, 'dilation', 15)) if lp_cfg else 15
+        self._lang_dyn_text = None
+        self._lang_dyn_canon = None
+
         # Dynamic object masking (lazy init)
         self.dynamic_enabled = getattr(cfg.dynamic, 'enabled', False)
         self._dynamic_detector = None
@@ -361,7 +384,7 @@ class SLAMPipeline:
 
     def _extract_language_features(
         self, rgb: torch.Tensor, frame_id: int
-    ) -> torch.Tensor | None:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Extract and compress language features for a keyframe.
 
         Args:
@@ -369,10 +392,13 @@ class SLAMPipeline:
             frame_id: frame index
 
         Returns:
-            (H, W, latent_dim) compressed feature map, or None if skipped
+            (compressed_map, lang_dyn_mask):
+              compressed_map: (H, W, latent_dim) or None if skipped
+              lang_dyn_mask: (H, W) bool, True = pixel matches the dynamic
+                vocabulary (LP1 language prior), or None if prior disabled
         """
         if not self.lang_enabled:
-            return None
+            return None, None
 
         self._init_language_pipeline()
 
@@ -402,6 +428,17 @@ class SLAMPipeline:
         if len(lang_scales) > 1:
             feat_map /= float(len(lang_scales))
 
+        # LP1 language prior: encode the dynamic vocabulary while CLIP is
+        # still on the GPU (cached after the first extraction).
+        if self.lang_prior_enabled and self._lang_dyn_text is None:
+            prompts = list(self.lang_prior_prompts)
+            canon = ["object", "things", "stuff", "texture"]
+            with torch.no_grad():
+                t = self._clip_extractor.encode_texts(prompts).to(self.device)
+                c = self._clip_extractor.encode_texts(canon).to(self.device)
+            self._lang_dyn_text = torch.nn.functional.normalize(t, dim=-1)
+            self._lang_dyn_canon = torch.nn.functional.normalize(c, dim=-1)
+
         # Offload CLIP + SAM2 back to CPU to free GPU for SLAM
         self._clip_extractor.model.to("cpu")
         self._clip_extractor.device = "cpu"
@@ -411,6 +448,28 @@ class SLAMPipeline:
 
         # Re-normalize after averaging (keep on CPU to save GPU mem)
         feat_map = torch.nn.functional.normalize(feat_map, dim=-1)
+
+        # LP1: per-pixel relevancy vs the dynamic vocabulary (max over
+        # prompts, contrastive vs canonicals) -> language-dynamic mask.
+        # Chunked over rows so the 768-D map never fully lands on GPU.
+        lang_dyn_mask = None
+        if self.lang_prior_enabled:
+            H_f, W_f = feat_map.shape[:2]
+            lang_dyn_mask = torch.zeros(H_f, W_f, dtype=torch.bool,
+                                        device=self.device)
+            temp = 50.0
+            with torch.no_grad():
+                for r0 in range(0, H_f, 64):
+                    block = feat_map[r0:r0 + 64].to(self.device)  # (h, W, 768)
+                    s_q = torch.einsum(
+                        "hwd,pd->hwp", block, self._lang_dyn_text
+                    ).max(dim=-1).values                          # (h, W)
+                    s_c = torch.einsum(
+                        "hwd,cd->hwc", block, self._lang_dyn_canon
+                    ).max(dim=-1).values
+                    rel = torch.exp(temp * s_q) / (
+                        torch.exp(temp * s_q) + torch.exp(temp * s_c))
+                    lang_dyn_mask[r0:r0 + 64] = rel > self.lang_prior_thresh
 
         # Flatten and add to autoencoder buffer for training (CPU is fine)
         flat_feats = feat_map.reshape(-1, self._clip_extractor.feat_dim)
@@ -466,7 +525,7 @@ class SLAMPipeline:
             compressed = torch.cat(chunks, dim=0)
             compressed_map = compressed.reshape(H, W, -1)
 
-        return compressed_map
+        return compressed_map, lang_dyn_mask
 
     def _build_retry_hypotheses(
         self,
@@ -697,6 +756,29 @@ class SLAMPipeline:
 
             self._prev_depth = depth.squeeze(0).clone()
 
+            # Evidence/inference separation: belief updates may only consume
+            # FRESH evidence (detector, language scores). The belief
+            # reprojection below is inference from existing belief — feeding
+            # it back into update_dynamic_belief creates a runaway loop
+            # (observed: mask grew 13% -> 62% over 50 frames).
+            evidence_mask = dynamic_mask
+
+            # LP1 dense propagation: reproject high-belief Gaussians into the
+            # (approximate, previous-pose) view so language-flagged objects
+            # are masked on EVERY frame, not just extraction keyframes.
+            if self.lang_prior_enabled and self.estimated_poses:
+                viewmat_prev = fast_se3_inverse(self.estimated_poses[-1])
+                belief_mask = gaussian_map.render_belief_mask(
+                    viewmat_prev, self.K, self.width, self.height,
+                    belief_thresh=self.lang_prior_belief_mask_thresh,
+                    dilation=self.lang_prior_dilation,
+                )
+                if belief_mask.any():
+                    dynamic_mask = torch.where(
+                        belief_mask, torch.zeros_like(dynamic_mask), dynamic_mask)
+                    info["belief_mask_pct"] = (
+                        belief_mask.float().mean().item() * 100)
+
             n_dynamic = (dynamic_mask < 0.5).sum().item()
             if n_dynamic > 0:
                 info["dynamic_pixels"] = n_dynamic
@@ -822,13 +904,16 @@ class SLAMPipeline:
                     info["dynamic_pixels"] = n_dyn
                     info["dynamic_pct"] = n_dyn / (self.height * self.width) * 100
 
-        # FIX 5: Update Bayesian dynamic belief for all Gaussians
-        if self.dynamic_enabled and dynamic_mask is not None:
+        # FIX 5: Update Bayesian dynamic belief for all Gaussians.
+        # Uses evidence_mask (detector output only), NOT dynamic_mask, which
+        # may contain the belief reprojection — see the loop note above.
+        belief_update_mask = evidence_mask if self.lang_prior_enabled else dynamic_mask
+        if self.dynamic_enabled and belief_update_mask is not None:
             use_bayesian = getattr(self.cfg.dynamic, 'use_bayesian_belief', True)
             if use_bayesian:
                 viewmat = fast_se3_inverse(est_pose)
                 gaussian_map.update_dynamic_belief(
-                    viewmat, self.K, self.width, self.height, dynamic_mask,
+                    viewmat, self.K, self.width, self.height, belief_update_mask,
                     increase=getattr(self.cfg.dynamic, 'belief_increase', 0.3),
                     decay=getattr(self.cfg.dynamic, 'belief_decay', 0.05),
                     depth=depth.squeeze(0),
@@ -857,7 +942,29 @@ class SLAMPipeline:
         )
         if should_extract_lang:
             t_lang = time.time()
-            lang_map = self._extract_language_features(rgb, frame_id)
+            lang_map, lang_dyn_mask = self._extract_language_features(rgb, frame_id)
+
+            # LP1 sparse evidence: union the language-dynamic pixels into
+            # this frame's mask (consumed by mapping + the stored keyframe)
+            # and deposit belief so the reprojection mask carries it forward.
+            if lang_dyn_mask is not None and lang_dyn_mask.any():
+                info["lang_dyn_pct"] = lang_dyn_mask.float().mean().item() * 100
+                if dynamic_mask is None:
+                    dynamic_mask = torch.ones(
+                        self.height, self.width, device=self.device)
+                dynamic_mask = torch.where(
+                    lang_dyn_mask, torch.zeros_like(dynamic_mask), dynamic_mask)
+                # Belief deposit from LANGUAGE EVIDENCE ONLY (fresh evidence;
+                # never the unioned mask, which contains reprojected belief)
+                lang_evidence = (~lang_dyn_mask).float()
+                viewmat = fast_se3_inverse(est_pose)
+                gaussian_map.update_dynamic_belief(
+                    viewmat, self.K, self.width, self.height, lang_evidence,
+                    increase=self.lang_prior_belief_increase,
+                    decay=0.0,  # decay already applied by the per-frame update
+                    depth=depth.squeeze(0),
+                )
+
             if lang_map is not None:
                 self._lang_cache[frame_id] = lang_map
                 # Opportunistic re-seeding: give never-seeded Gaussians
