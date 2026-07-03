@@ -255,7 +255,8 @@ class Mapper:
                     else:
                         gt_lang_ds = gt_lang
                     loss_l = language_loss(
-                        rendered["lang_feats"], gt_lang_ds, rendered["alpha"]
+                        rendered["lang_feats"], gt_lang_ds, rendered["alpha"],
+                        mask=frame_mask,
                     )
                     iter_loss = iter_loss + lang_weight * loss_l
                     loss_lang_total += loss_l.item()

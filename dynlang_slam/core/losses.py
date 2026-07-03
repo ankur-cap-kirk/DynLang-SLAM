@@ -87,6 +87,7 @@ def language_loss(
     pred_lang: torch.Tensor,
     gt_lang: torch.Tensor,
     alpha: torch.Tensor = None,
+    mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """Language feature loss: L1 + cosine distance.
 
@@ -94,15 +95,24 @@ def language_loss(
         pred_lang: (H, W, D) rendered language features
         gt_lang: (H, W, D) target language features (autoencoder-compressed CLIP)
         alpha: (H, W, 1) or (H, W) rendered alpha, used to mask unmapped regions
+        mask: optional (H, W) dynamic mask (1=static, 0=dynamic). Without it,
+            a dynamic object's pixels supervise map features wherever static
+            background renders behind it — the mechanism behind the ~2 cm
+            full-mode ATE drag observed only on BONN person_tracking.
 
     Returns:
         Scalar language loss
     """
-    if alpha is not None:
-        if alpha.dim() == 3:
-            alpha = alpha.squeeze(-1)
-        # Only supervise where map has coverage
-        valid = (alpha > 0.5).float()
+    if alpha is not None or mask is not None:
+        if alpha is not None:
+            if alpha.dim() == 3:
+                alpha = alpha.squeeze(-1)
+            # Only supervise where map has coverage
+            valid = (alpha > 0.5).float()
+        else:
+            valid = torch.ones_like(pred_lang[..., 0])
+        if mask is not None:
+            valid = valid * (mask > 0.5).float()
         if valid.sum() < 1:
             return torch.tensor(0.0, device=pred_lang.device)
 
