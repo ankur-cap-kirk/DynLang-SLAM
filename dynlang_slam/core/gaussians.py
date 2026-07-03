@@ -456,6 +456,84 @@ class GaussianMap(nn.Module):
                     self.dynamic_belief[dyn_indices] + increase
                 ).clamp(max=1.0)
 
+    def seed_lang_feats_from_map(
+        self,
+        viewmat: torch.Tensor,
+        K: torch.Tensor,
+        width: int,
+        height: int,
+        lang_map: torch.Tensor,
+        mask: torch.Tensor = None,
+        depth: torch.Tensor = None,
+        min_norm: float = 0.1,
+        depth_margin: float = 0.15,
+    ) -> int:
+        """Opportunistically seed unseeded Gaussians from a keyframe feature map.
+
+        Gaussians whose lang_feats are still near zero (never seeded at
+        creation — e.g. the first-frame map, or keyframes without an
+        extraction) get the compressed feature at the pixel they project to,
+        provided that pixel is static AND the Gaussian is at the observed
+        surface (|z - depth| <= depth_margin), so occluded background never
+        inherits foreground features. Call only after the autoencoder is
+        frozen so all seeded features share one latent space.
+
+        Args:
+            viewmat: (4, 4) world-to-camera
+            K: (3, 3) intrinsics
+            width, height: image dimensions
+            lang_map: (H, W, lang_feat_dim) compressed feature map
+            mask: optional (H, W) float, 1=static, 0=dynamic
+            depth: optional (H, W) observed depth in meters
+            min_norm: Gaussians with feature norm below this are candidates
+            depth_margin: surface-agreement slack in meters
+
+        Returns:
+            Number of Gaussians seeded
+        """
+        if self._num_gaussians == 0:
+            return 0
+
+        with torch.no_grad():
+            unseeded = self.lang_feats.data.norm(dim=-1) < min_norm
+            if not unseeded.any():
+                return 0
+
+            R = viewmat[:3, :3]
+            t = viewmat[:3, 3]
+            means_cam = self.means.data @ R.T + t.unsqueeze(0)
+            z = means_cam[:, 2]
+
+            fx, fy = K[0, 0], K[1, 1]
+            cx, cy = K[0, 2], K[1, 2]
+            u = (means_cam[:, 0] * fx / z + cx).long()
+            v = (means_cam[:, 1] * fy / z + cy).long()
+
+            valid = (unseeded & (z > 0.01)
+                     & (u >= 0) & (u < width) & (v >= 0) & (v < height))
+            if not valid.any():
+                return 0
+
+            u_v, v_v, z_v = u[valid], v[valid], z[valid]
+            keep = torch.ones_like(z_v, dtype=torch.bool)
+
+            if mask is not None:
+                mask_dev = mask.to(self.device) if mask.device != self.device else mask
+                keep &= mask_dev[v_v, u_v] > 0.5
+
+            if depth is not None:
+                depth_dev = depth.to(self.device) if depth.device != self.device else depth
+                d_obs = depth_dev[v_v, u_v]
+                keep &= (d_obs > 0) & ((z_v - d_obs).abs() <= depth_margin)
+
+            if not keep.any():
+                return 0
+
+            idx = torch.where(valid)[0][keep]
+            lang_dev = lang_map.to(self.device) if lang_map.device != self.device else lang_map
+            self.lang_feats.data[idx] = lang_dev[v_v[keep], u_v[keep]]
+            return int(idx.shape[0])
+
     def get_activated_params(self, suppress_dynamic: bool = True) -> dict:
         """Get activated (post-nonlinearity) Gaussian parameters.
 

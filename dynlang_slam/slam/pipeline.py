@@ -860,6 +860,20 @@ class SLAMPipeline:
             lang_map = self._extract_language_features(rgb, frame_id)
             if lang_map is not None:
                 self._lang_cache[frame_id] = lang_map
+                # Opportunistic re-seeding: give never-seeded Gaussians
+                # (first-frame map, non-extraction keyframes, densified
+                # orphans) the feature at their projected pixel. Post-freeze
+                # only, so all features share one latent space.
+                if self._autoencoder is not None and self._autoencoder.is_frozen:
+                    viewmat = fast_se3_inverse(est_pose)
+                    n_seeded = gaussian_map.seed_lang_feats_from_map(
+                        viewmat, self.K, self.width, self.height,
+                        lang_map,
+                        mask=dynamic_mask,
+                        depth=depth.squeeze(0),
+                    )
+                    if n_seeded > 0:
+                        info["lang_reseeded"] = n_seeded
             info["lang_extract_time"] = time.time() - t_lang
 
         # --- MAPPING ---
