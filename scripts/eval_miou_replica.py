@@ -133,6 +133,9 @@ def main():
         PROJECT_ROOT, "results", "sweep", "miou_slam_checkpoint.pt"))
     ap.add_argument("--from-checkpoint", action="store_true",
                     help="skip SLAM; evaluate a previously saved map")
+    ap.add_argument("--scales", default="whole",
+                    help="SAM extraction scale(s), comma-separated: "
+                         "whole | part | subpart")
     args = ap.parse_args()
 
     import rerun_d16_all as R
@@ -151,6 +154,8 @@ def main():
 
     # --- SLAM (semantic images never enter the pipeline) ---
     cfg = R.build_cfg(R.SCENES[2], "full")
+    cfg.language.scales = [s.strip() for s in args.scales.split(",")]
+    print(f"language scales: {cfg.language.scales}")
     gmap = GaussianMap(
         sh_degree=cfg.gaussians.sh_degree,
         lang_feat_dim=cfg.gaussians.lang_feat_dim,
