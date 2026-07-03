@@ -1,0 +1,8 @@
+{"scene": "h1", "mode": "full", "seed": 42, "n_frames": 100, "ate_rmse_cm": 8.921884634317177, "gaussians": 35214, "total_time_s": 340.18508529663086, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 123, "n_frames": 100, "ate_rmse_cm": 8.122862186827916, "gaussians": 35977, "total_time_s": 350.7303557395935, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 2024, "n_frames": 100, "ate_rmse_cm": 10.45740062944311, "gaussians": 33693, "total_time_s": 323.04263377189636, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 7, "n_frames": 100, "ate_rmse_cm": 6.776638617225853, "gaussians": 37012, "total_time_s": 365.51142406463623, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 77, "n_frames": 100, "ate_rmse_cm": 7.4889868275519, "gaussians": 35585, "total_time_s": 375.1064076423645, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 555, "n_frames": 100, "ate_rmse_cm": 9.671500702227242, "gaussians": 35838, "total_time_s": 344.9742498397827, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 3407, "n_frames": 100, "ate_rmse_cm": 9.123867004643396, "gaussians": 36265, "total_time_s": 361.3432159423828, "experiment": "langmask_1a"}
+{"scene": "h1", "mode": "full", "seed": 31337, "n_frames": 100, "ate_rmse_cm": 7.186815697756825, "gaussians": 36787, "total_time_s": 360.72905468940735, "experiment": "langmask_1a"}
