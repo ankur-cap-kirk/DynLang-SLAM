@@ -147,6 +147,12 @@ class SLAMPipeline:
         self._lang_dyn_text = None
         self._lang_dyn_canon = None
 
+        # Experiment hook: an injectable extra dynamic-evidence source.
+        # If set, called with the frame dict; must return (H, W) bool
+        # (True = dynamic) or None. Treated as FRESH evidence (feeds belief).
+        # Used by oracle ablations (e.g. GT-pose depth-warp motion masks).
+        self.external_dynamic_mask_fn = None
+
         # Dynamic object masking (lazy init)
         self.dynamic_enabled = getattr(cfg.dynamic, 'enabled', False)
         self._dynamic_detector = None
@@ -755,6 +761,15 @@ class SLAMPipeline:
             dynamic_mask = dynamic_mask.to(self.device)
 
             self._prev_depth = depth.squeeze(0).clone()
+
+            # Experiment hook: extra dynamic evidence (e.g. oracle masks)
+            if self.external_dynamic_mask_fn is not None:
+                ext_dyn = self.external_dynamic_mask_fn(frame)
+                if ext_dyn is not None and ext_dyn.any():
+                    dynamic_mask = torch.where(
+                        ext_dyn.to(self.device),
+                        torch.zeros_like(dynamic_mask), dynamic_mask)
+                    info["ext_dyn_pct"] = ext_dyn.float().mean().item() * 100
 
             # Evidence/inference separation: belief updates may only consume
             # FRESH evidence (detector, language scores). The belief
