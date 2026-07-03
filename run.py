@@ -17,8 +17,71 @@ import numpy as np
 
 from dynlang_slam.utils.config import load_config, print_config
 from dynlang_slam.data.replica import ReplicaDataset, get_replica_intrinsics
+from dynlang_slam.data.tum import (
+    TUMDataset,
+    get_bonn_intrinsics,
+    get_tum_intrinsics,
+    get_pixel8_portrait_intrinsics,
+    load_intrinsics_from_file,
+)
 from dynlang_slam.core.gaussians import GaussianMap
 from dynlang_slam.slam.pipeline import SLAMPipeline
+
+
+def _load_dataset_and_intrinsics(cfg):
+    """Dispatch on cfg.dataset.type. Returns (dataset, intrinsics_dict, has_gt).
+
+    Backward compatible: if cfg.dataset.type is missing or "replica", behaves
+    identically to the original hardcoded path.
+    """
+    dataset_type = str(getattr(cfg.dataset, "type", "replica")).lower()
+    dataset_path = Path(cfg.dataset.path) / cfg.dataset.scene
+    h, w = cfg.dataset.image_height, cfg.dataset.image_width
+
+    if dataset_type == "replica":
+        dataset = ReplicaDataset(
+            data_dir=str(dataset_path),
+            height=h,
+            width=w,
+            depth_scale=cfg.dataset.depth_scale,
+            max_frames=cfg.dataset.max_frames,
+        )
+        intrinsics = get_replica_intrinsics(
+            fx=cfg.camera.fx, fy=cfg.camera.fy,
+            cx=cfg.camera.cx, cy=cfg.camera.cy,
+            height=h, width=w,
+        )
+        return dataset, intrinsics, True
+
+    # TUM-format paths (BONN, TUM-RGBD, H4-from-phone).
+    has_gt = bool(getattr(cfg.dataset, "has_gt", True))
+    dataset = TUMDataset(
+        data_dir=str(dataset_path),
+        height=h,
+        width=w,
+        depth_scale=cfg.dataset.depth_scale,
+        max_frames=cfg.dataset.max_frames,
+        has_gt=has_gt,
+    )
+    if dataset_type in ("tum", "bonn"):
+        intrinsics = (get_bonn_intrinsics(height=h, width=w)
+                      if dataset_type == "bonn"
+                      else get_tum_intrinsics(height=h, width=w))
+    elif dataset_type == "h4":
+        intrinsics_file = dataset_path / "intrinsics.txt"
+        if intrinsics_file.exists():
+            intrinsics = load_intrinsics_from_file(
+                str(intrinsics_file), height=h, width=w,
+            )
+        else:
+            print(f"[warn] {intrinsics_file} missing; using Pixel-8 fallback.")
+            intrinsics = get_pixel8_portrait_intrinsics(height=h, width=w)
+    else:
+        raise ValueError(
+            f"Unknown dataset.type '{dataset_type}'. "
+            "Expected one of: replica, tum, bonn, h4."
+        )
+    return dataset, intrinsics, has_gt
 
 
 def main():
@@ -45,20 +108,9 @@ def main():
 
     # Load dataset
     print("\n[1/4] Loading dataset...")
-    dataset_path = Path(cfg.dataset.path) / cfg.dataset.scene
-    dataset = ReplicaDataset(
-        data_dir=str(dataset_path),
-        height=cfg.dataset.image_height,
-        width=cfg.dataset.image_width,
-        depth_scale=cfg.dataset.depth_scale,
-        max_frames=cfg.dataset.max_frames,
-    )
-    intrinsics = get_replica_intrinsics(
-        fx=cfg.camera.fx, fy=cfg.camera.fy,
-        cx=cfg.camera.cx, cy=cfg.camera.cy,
-        height=cfg.dataset.image_height,
-        width=cfg.dataset.image_width,
-    )
+    dataset, intrinsics, has_gt = _load_dataset_and_intrinsics(cfg)
+    if not has_gt:
+        print("  [info] Dataset has no GT trajectory; ATE will not be reported.")
 
     # Initialize Gaussian map
     print("\n[2/4] Initializing Gaussian map...")
@@ -147,18 +199,22 @@ def main():
     print(f"\n[4/4] Results Summary")
     print("=" * 60)
 
-    # ATE RMSE
-    all_gt_poses = [dataset[0]["pose"].to(device)] + gt_poses
-    ate_rmse = slam.compute_ate_rmse(all_gt_poses)
-    ate_errors_np = np.array(ate_errors) * 100  # convert to cm
-
     print(f"  Scene: {cfg.dataset.scene}")
     print(f"  Frames processed: {len(dataset)}")
     print(f"  Final Gaussians: {gaussian_map.num_gaussians}")
-    print(f"  ATE RMSE: {ate_rmse*100:.3f} cm")
-    print(f"  ATE Mean: {ate_errors_np.mean():.3f} cm")
-    print(f"  ATE Median: {np.median(ate_errors_np):.3f} cm")
-    print(f"  ATE Max: {ate_errors_np.max():.3f} cm")
+
+    ate_rmse = None
+    ate_errors_np = np.array(ate_errors) * 100 if ate_errors else np.zeros(0)
+    if has_gt:
+        all_gt_poses = [dataset[0]["pose"].to(device)] + gt_poses
+        ate_rmse = slam.compute_ate_rmse(all_gt_poses)
+        print(f"  ATE RMSE: {ate_rmse*100:.3f} cm")
+        if ate_errors_np.size:
+            print(f"  ATE Mean: {ate_errors_np.mean():.3f} cm")
+            print(f"  ATE Median: {np.median(ate_errors_np):.3f} cm")
+            print(f"  ATE Max: {ate_errors_np.max():.3f} cm")
+    else:
+        print("  ATE: (skipped, no GT trajectory available)")
     print(f"  Total time: {total_time:.1f}s ({len(dataset)/total_time:.1f} FPS)")
     if device == "cuda":
         print(f"  Peak VRAM: {torch.cuda.max_memory_allocated()/(1024**3):.2f} GB")
@@ -182,10 +238,13 @@ def main():
         f.write(f"scene: {cfg.dataset.scene}\n")
         f.write(f"frames: {len(dataset)}\n")
         f.write(f"gaussians: {gaussian_map.num_gaussians}\n")
-        f.write(f"ate_rmse_cm: {ate_rmse*100:.4f}\n")
-        f.write(f"ate_mean_cm: {ate_errors_np.mean():.4f}\n")
-        f.write(f"ate_median_cm: {np.median(ate_errors_np):.4f}\n")
-        f.write(f"ate_max_cm: {ate_errors_np.max():.4f}\n")
+        if has_gt and ate_rmse is not None:
+            f.write(f"ate_rmse_cm: {ate_rmse*100:.4f}\n")
+            f.write(f"ate_mean_cm: {ate_errors_np.mean():.4f}\n")
+            f.write(f"ate_median_cm: {np.median(ate_errors_np):.4f}\n")
+            f.write(f"ate_max_cm: {ate_errors_np.max():.4f}\n")
+        else:
+            f.write("ate_rmse_cm: NA  # no GT trajectory\n")
         f.write(f"total_time_s: {total_time:.2f}\n")
         f.write(f"fps: {len(dataset)/total_time:.2f}\n")
     print(f"  Metrics saved: {metrics_path}")
