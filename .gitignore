@@ -45,3 +45,7 @@ report/extracted/
 # Personal class materials (not for public repo)
 discussion_post.md
 reply_*.md
+
+# Personal class-discussion screenshots (never publish)
+report/my_post.png
+report/reply_*.png
