@@ -1,0 +1,4 @@
+{"scene": "h1", "mode": "full", "seed": 42, "n_frames": 100, "ate_rmse_cm": 9.621636726479018, "gaussians": 36504, "total_time_s": 343.522579908371, "experiment": "a2_retry"}
+{"scene": "h1", "mode": "full", "seed": 123, "n_frames": 100, "ate_rmse_cm": 8.662730308120487, "gaussians": 36086, "total_time_s": 356.6385748386383, "experiment": "a2_retry"}
+{"scene": "h1", "mode": "full", "seed": 2024, "n_frames": 100, "ate_rmse_cm": 8.250210383890245, "gaussians": 36239, "total_time_s": 368.5544662475586, "experiment": "a2_retry"}
+{"scene": "h1", "mode": "full", "seed": 7, "n_frames": 100, "ate_rmse_cm": 12.345620986880794, "gaussians": 45570, "total_time_s": 308.9357268810272, "experiment": "a2_retry"}
