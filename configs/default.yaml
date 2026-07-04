@@ -210,10 +210,18 @@ dynamic:
       - "an animal or pet"
       - "a balloon or floating object"
       - "an object being moved or carried"
-    relevancy_thresh: 0.6   # per-pixel contrastive relevancy cutoff
+    relevancy_thresh: 0.6   # v2.1: 0.55 proposed ~52% of the frame and merged
+                            # connected components into mega-blobs whose motion
+                            # fraction diluted below the cutoff — the person was
+                            # vetoed together with the furniture it fused to.
+                            # 0.6 keeps proposals segment-shaped (~23-35%).
     belief_increase: 0.5    # belief deposit for language-flagged Gaussians
     belief_mask_thresh: 0.5 # belief above this reprojects as dynamic
     dilation: 15            # px dilation of the reprojection mask
+    # v2 stage 2: geometry confirms proposals (coldstart-campaign doc:
+    # no fixed threshold separates person from furniture; physics can)
+    verify_geometry: true   # instance depth-motion check on mask components
+    min_blob_px: 200        # drop speckle components below this size
 
   # Class-agnostic dynamic mask via CoTracker2 (PIPs lineage, Lec 27).
   # Tracks a grid of query points through a sliding window and flags any

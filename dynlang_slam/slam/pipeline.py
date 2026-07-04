@@ -144,8 +144,14 @@ class SLAMPipeline:
             getattr(lp_cfg, 'belief_mask_thresh', 0.5)) if lp_cfg else 0.5
         self.lang_prior_dilation = int(
             getattr(lp_cfg, 'dilation', 15)) if lp_cfg else 15
+        # v2: geometry confirmation of language proposals
+        self.lang_prior_verify = bool(
+            getattr(lp_cfg, 'verify_geometry', True)) if lp_cfg else True
+        self.lang_prior_min_blob = int(
+            getattr(lp_cfg, 'min_blob_px', 200)) if lp_cfg else 200
         self._lang_dyn_text = None
         self._lang_dyn_canon = None
+        self._verify_prev_depth: torch.Tensor | None = None
 
         # Experiment hook: an injectable extra dynamic-evidence source.
         # If set, called with the frame dict; must return (H, W) bool
@@ -533,6 +539,53 @@ class SLAMPipeline:
 
         return compressed_map, lang_dyn_mask
 
+    def _verify_language_instances(
+        self, lang_dyn_mask: torch.Tensor, depth: torch.Tensor
+    ) -> torch.Tensor:
+        """LP1-v2 stage 2: geometry confirms what language proposed.
+
+        Splits the (generous, recall-oriented) language-dynamic mask into
+        connected components and keeps only instances that show real
+        frame-to-frame depth motion — the same instance-level test already
+        gating non-person YOLO classes. Static furniture that matched a
+        movable concept is vetoed by physics, so the relevancy threshold no
+        longer has to provide precision.
+
+        Args:
+            lang_dyn_mask: (H, W) bool, True = language-proposed dynamic
+            depth: (1, H, W) or (H, W) current frame depth in meters
+
+        Returns:
+            (H, W) bool — geometry-confirmed dynamic pixels
+        """
+        import cv2
+        import numpy as np
+
+        if self._verify_prev_depth is None:
+            # No previous frame to compare against: no confirmation possible.
+            return torch.zeros_like(lang_dyn_mask)
+
+        cur = depth.squeeze(0) if depth.dim() == 3 else depth
+        rel_diff = (cur - self._verify_prev_depth).abs() / cur.clamp(min=0.1)
+
+        thresh = getattr(self.cfg.dynamic, 'depth_verify_thresh', 0.05)
+        min_frac = float(getattr(self.cfg.dynamic, 'instance_moving_frac', 0.2))
+
+        labels_np = cv2.connectedComponents(
+            lang_dyn_mask.cpu().numpy().astype(np.uint8))[1]
+        labels = torch.from_numpy(labels_np).to(lang_dyn_mask.device)
+
+        confirmed = torch.zeros_like(lang_dyn_mask)
+        for lab in range(1, int(labels.max().item()) + 1):
+            blob = labels == lab
+            n = int(blob.sum().item())
+            if n < self.lang_prior_min_blob:
+                continue
+            moving_frac = (rel_diff[blob] > thresh).float().mean().item()
+            if moving_frac >= min_frac:
+                confirmed |= blob
+        return confirmed
+
     def _build_retry_hypotheses(
         self,
         primary_init: torch.Tensor,
@@ -760,6 +813,10 @@ class SLAMPipeline:
             dynamic_mask = self._temporal_filter.update(raw_dynamic.cpu())
             dynamic_mask = dynamic_mask.to(self.device)
 
+            # Keep the outgoing previous depth for LP1-v2 instance
+            # verification at extraction time (which runs after this
+            # overwrite and needs a genuine frame-to-frame comparison).
+            self._verify_prev_depth = self._prev_depth
             self._prev_depth = depth.squeeze(0).clone()
 
             # Experiment hook: extra dynamic evidence (e.g. oracle masks)
@@ -958,6 +1015,16 @@ class SLAMPipeline:
         if should_extract_lang:
             t_lang = time.time()
             lang_map, lang_dyn_mask = self._extract_language_features(rgb, frame_id)
+
+            # LP1-v2: geometry confirms language proposals before any pixel
+            # enters the mask or deposits belief (see coldstart-campaign doc:
+            # no fixed threshold separates person from furniture; physics can).
+            if (lang_dyn_mask is not None and lang_dyn_mask.any()
+                    and self.lang_prior_verify):
+                info["lang_proposed_pct"] = (
+                    lang_dyn_mask.float().mean().item() * 100)
+                lang_dyn_mask = self._verify_language_instances(
+                    lang_dyn_mask, depth)
 
             # LP1 sparse evidence: union the language-dynamic pixels into
             # this frame's mask (consumed by mapping + the stored keyframe)
