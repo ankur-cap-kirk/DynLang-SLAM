@@ -58,6 +58,11 @@ def main():
     ap.add_argument("--queries", default=None,
                     help="comma-separated scripted queries (otherwise interactive)")
     ap.add_argument("--point-radius", type=float, default=0.008)
+    ap.add_argument("--up", default="y-down",
+                    choices=["y-down", "y-up", "z-up", "z-down"],
+                    help="world up-axis convention so the room sits level "
+                         "on the viewer grid (BONN/TUM maps: y-down; try "
+                         "z-up if the scene still looks tilted)")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -91,6 +96,13 @@ def main():
     else:
         rr.spawn()
 
+    view_coords = {
+        "y-down": rr.ViewCoordinates.RIGHT_HAND_Y_DOWN,
+        "y-up": rr.ViewCoordinates.RIGHT_HAND_Y_UP,
+        "z-up": rr.ViewCoordinates.RIGHT_HAND_Z_UP,
+        "z-down": rr.ViewCoordinates.RIGHT_HAND_Z_DOWN,
+    }[args.up]
+    rr.log("/", view_coords, static=True)
     rr.log("map/scene", rr.Points3D(positions, colors=base_colors,
                                     radii=args.point_radius), static=True)
     print(f"\nScene logged ({int(norm_ok.sum())} of {gmap.num_gaussians} "
