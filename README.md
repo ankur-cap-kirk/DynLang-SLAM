@@ -2,6 +2,8 @@
 
 **Open-vocabulary dynamic-scene SLAM with 3D Gaussian Splatting.**
 
+![Text queries against a DynLang-SLAM map of BONN person_tracking. Real objects light up as compact regions; querying "person" returns only scattered noise — the person walked through every frame of the recording but was masked out during mapping and is not in the map.](assets/demo_bonn.gif)
+
 DynLang-SLAM builds a language-queryable 3D Gaussian map from an RGB-D stream while
 detecting and masking dynamic objects, so moving people and objects neither corrupt
 camera tracking nor pollute the semantic map. Text queries ("monitor", "chair") localize
@@ -88,6 +90,10 @@ person ever existed).
 Flags: `--save demo.rrd --queries "sofa,lamp"` records a replayable file
 headless; `--up z-up` if your map's world convention leaves the scene
 tilted. A presenter's script lives in `report/demo_runbook.md`.
+
+Showcase videos like the one above are rendered with
+`scripts/demo_render_video.py` (turntable or look-around orbits of the
+actual Gaussian rendering, query heatmaps burned in; outputs .mp4 + .gif).
 
 ## Quickstart
 
