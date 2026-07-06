@@ -67,6 +67,28 @@ their licenses (Replica is research-only; please cite BONN/TUM/Replica when usin
 - **TUM RGB-D**: https://cvg.cit.tum.de/data/datasets/rgbd-dataset → `data/TUM/...`
 - **Replica**: `python scripts/download_replica.py` → `data/Replica/<scene>/`
 
+## Live demo: query a 3D map with text
+
+After any run that saves a checkpoint (e.g. `scripts/eval_miou_replica.py`),
+open the map in an interactive [Rerun](https://rerun.io) viewer and type
+free-text queries — matching regions light up in place:
+
+```bash
+pip install rerun-sdk matplotlib
+python scripts/demo_live_query.py --checkpoint results/sweep/miou_slam_checkpoint.pt
+```
+
+Type `sofa`, `lamp`, `door` in the terminal; each query becomes a step on
+the Rerun timeline you can scrub back through. On a dynamic-scene map
+(BONN), querying `person` returns scattered noise rather than a compact
+blob — the person was masked out during mapping and is *not in the map*
+(measured: its relevancy matches the noise floor of a scene where no
+person ever existed).
+
+Flags: `--save demo.rrd --queries "sofa,lamp"` records a replayable file
+headless; `--up z-up` if your map's world convention leaves the scene
+tilted. A presenter's script lives in `report/demo_runbook.md`.
+
 ## Quickstart
 
 ```bash
